@@ -686,7 +686,9 @@ impl eframe::App for Pad {
             return;
         }
         egui::CentralPanel::default().show(ui, |ui| {
-            let h = ui.available_height();
+            // TextEdit høydeberegnes fra antall rader, så regn ut hvor mange som fyller panelet
+            let rad_h = ui.ctx().fonts_mut(|f| f.row_height(&egui::FontId::monospace(skrift)));
+            let rader = (ui.available_height() / rad_h).ceil().max(1.0) as usize;
             let rulle = if ordbryt {
                 egui::ScrollArea::vertical()
             } else {
@@ -695,8 +697,9 @@ impl eframe::App for Pad {
             rulle.auto_shrink(false).show(ui, |ui| {
                 let felt = egui::TextEdit::multiline(&mut self.tekst)
                     .id(editor_id())
+                    .font(egui::FontId::monospace(skrift))
                     .desired_width(f32::INFINITY)
-                    .min_size(egui::vec2(0.0, h))
+                    .desired_rows(rader)
                     .layouter(&mut oppsett);
                 if ui.add(felt).changed() {
                     self.melding.clear();
