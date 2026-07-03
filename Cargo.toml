@@ -1,0 +1,26 @@
+[package]
+name = "rustpad"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "rustpad"
+path = "main.rs"
+
+[[bin]]
+name = "rustpad-gui"
+path = "gui.rs"
+
+[dependencies]
+arboard = "3.6.1"
+chrono = "0.4.45"
+crossterm = "0.27"
+eframe = "0.35.0"
+egui_commonmark = "0.24.0"
+rfd = "0.17.2"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+panic = "abort"
