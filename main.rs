@@ -1,10 +1,10 @@
-// Rustpad – terminal-notepad for txt/md/ini m.m. med md-visning (^P)
+// Rustpad – terminal notepad for txt/md/ini etc. with md preview (^P)
 use crossterm::{cursor::MoveTo,event::{read,Event,KeyCode::*,KeyEventKind,KeyModifiers as M},execute,queue,
 style::{Color::*,Print,ResetColor,SetBackgroundColor as Bg,SetForegroundColor as Fg},terminal::*};
 use std::io::{stdout,Write};
 fn b(s:&str,i:usize)->usize{s.char_indices().nth(i).map(|(b,_)|b).unwrap_or(s.len())}
 fn main()->std::io::Result<()>{
-let p=std::env::args().nth(1).unwrap_or("uten_navn.txt".into());
+let p=std::env::args().nth(1).unwrap_or("untitled.txt".into());
 let mut l:Vec<String>=std::fs::read_to_string(&p).unwrap_or_default().lines().map(|s|s.into()).collect();
 if l.is_empty(){l.push(String::new())}
 let ini=[".ini",".toml",".conf",".cfg"].iter().any(|e|p.ends_with(e));
@@ -33,8 +33,8 @@ else{queue!(o,Print(&s))?}
 queue!(o,Fg(if t.starts_with('['){Cyan}else{DarkGrey}),Print(&s))?
 }else{queue!(o,Print(&s))?}}}
 queue!(o,ResetColor)?}
-let st=format!(" RUSTPAD  {}{}  {}:{} {}  ^S=lagre ^P=md ^Q=slutt {}",
-p,if dy{"*"}else{""},cy+1,cx+1,if pv{"[VIS]"}else{"[RED]"},msg);
+let st=format!(" RUSTPAD  {}{}  {}:{} {}  ^S=save ^P=md ^Q=quit {}",
+p,if dy{"*"}else{""},cy+1,cx+1,if pv{"[VIEW]"}else{"[EDIT]"},msg);
 let st:String=st.chars().take(w).collect();
 queue!(o,MoveTo(0,h as u16),Bg(White),Fg(Black),Print(format!("{:<1$}",st,w)),ResetColor,
 MoveTo(cx as u16,(cy-off)as u16))?;o.flush()?;
@@ -44,7 +44,7 @@ msg.clear();
 let c=k.modifiers.contains(M::CONTROL);
 match k.code{
 Char('q')if c=>break,
-Char('s')if c=>{std::fs::write(&p,l.join("\n")+"\n")?;dy=false;msg="Lagret!".into()}
+Char('s')if c=>{std::fs::write(&p,l.join("\n")+"\n")?;dy=false;msg="Saved!".into()}
 Char('p')if c=>pv=!pv,
 Up=>cy=cy.saturating_sub(1),
 Down=>if cy+1<l.len(){cy+=1},

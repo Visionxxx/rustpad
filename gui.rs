@@ -1,4 +1,4 @@
-// Rustpad GUI – notisblokk à la Notepad (eframe/egui)
+// Rustpad GUI – a Notepad-style text editor (eframe/egui)
 use eframe::egui;
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -7,204 +7,204 @@ fn editor_id() -> egui::Id {
     egui::Id::new("rustpad_editor")
 }
 
-// byteindeks for tegn nr. i (samme triks som i main.rs)
-fn byte(s: &str, i: usize) -> usize {
+// byte index of char number i (same trick as in main.rs)
+fn byte_idx(s: &str, i: usize) -> usize {
     s.char_indices().nth(i).map(|(b, _)| b).unwrap_or(s.len())
 }
 
-// liten bokstav for søk uten forskjell på store/små
-fn sml(c: char) -> char {
+// lowercase for case-insensitive search
+fn lower(c: char) -> char {
     c.to_lowercase().next().unwrap_or(c)
 }
 
 fn main() -> eframe::Result {
-    let fil = std::env::args().nth(1).map(PathBuf::from);
+    let file = std::env::args().nth(1).map(PathBuf::from);
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([900.0, 600.0])
             .with_min_inner_size([300.0, 200.0]),
         ..Default::default()
     };
-    eframe::run_native("Rustpad", opts, Box::new(|_| Ok(Box::new(Pad::ny(fil)))))
+    eframe::run_native("Rustpad", opts, Box::new(|_| Ok(Box::new(Notepad::new(file)))))
 }
 
-struct Pad {
-    sti: Option<PathBuf>,
-    tekst: String,
-    lagret: String, // innholdet slik det sist ble lagret/åpnet
-    melding: String,
-    lukk_ok: bool,
-    // søk og erstatt
-    vis_sok: bool,
-    vis_erstatt: bool,
-    fokus_sok: bool,
-    sok: String,
-    erstatt: String,
-    skill_store: bool,
-    // gå til linje
-    vis_ga_til: bool,
-    ga_til: String,
-    // format og visning
-    ordbryting: bool,
-    vis_status: bool,
-    skrift: f32,
-    // markdown-visning
-    vis_md: bool,
+struct Notepad {
+    path: Option<PathBuf>,
+    text: String,
+    saved: String, // the content as it was last saved/opened
+    status_msg: String,
+    allow_close: bool,
+    // find and replace
+    show_find: bool,
+    show_replace: bool,
+    focus_find: bool,
+    query: String,
+    replacement: String,
+    match_case: bool,
+    // go to line
+    show_goto: bool,
+    goto_input: String,
+    // format and view
+    word_wrap: bool,
+    show_status: bool,
+    font_size: f32,
+    // markdown preview
+    show_md: bool,
     md_cache: egui_commonmark::CommonMarkCache,
 }
 
-impl Pad {
-    fn ny(sti: Option<PathBuf>) -> Self {
-        let tekst = sti
+impl Notepad {
+    fn new(path: Option<PathBuf>) -> Self {
+        let text = path
             .as_ref()
             .and_then(|p| std::fs::read_to_string(p).ok())
             .unwrap_or_default();
-        Pad {
-            sti,
-            lagret: tekst.clone(),
-            tekst,
-            melding: String::new(),
-            lukk_ok: false,
-            vis_sok: false,
-            vis_erstatt: false,
-            fokus_sok: false,
-            sok: String::new(),
-            erstatt: String::new(),
-            skill_store: false,
-            vis_ga_til: false,
-            ga_til: String::new(),
-            ordbryting: true,
-            vis_status: true,
-            skrift: 14.0,
-            vis_md: std::env::var_os("RUSTPAD_MD").is_some(),
+        Notepad {
+            path,
+            saved: text.clone(),
+            text,
+            status_msg: String::new(),
+            allow_close: false,
+            show_find: false,
+            show_replace: false,
+            focus_find: false,
+            query: String::new(),
+            replacement: String::new(),
+            match_case: false,
+            show_goto: false,
+            goto_input: String::new(),
+            word_wrap: true,
+            show_status: true,
+            font_size: 14.0,
+            show_md: std::env::var_os("RUSTPAD_MD").is_some(),
             md_cache: Default::default(),
         }
     }
 
-    fn endret(&self) -> bool {
-        self.tekst != self.lagret
+    fn is_dirty(&self) -> bool {
+        self.text != self.saved
     }
 
-    fn navn(&self) -> String {
-        self.sti
+    fn file_name(&self) -> String {
+        self.path
             .as_ref()
             .and_then(|p| p.file_name())
             .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "Uten navn".into())
+            .unwrap_or_else(|| "Untitled".into())
     }
 
-    // ---------- fil ----------
+    // ---------- file ----------
 
-    fn skriv(&mut self) {
-        if let Some(p) = &self.sti {
-            match std::fs::write(p, &self.tekst) {
+    fn write_file(&mut self) {
+        if let Some(p) = &self.path {
+            match std::fs::write(p, &self.text) {
                 Ok(_) => {
-                    self.lagret = self.tekst.clone();
-                    self.melding = "Lagret!".into();
+                    self.saved = self.text.clone();
+                    self.status_msg = "Saved!".into();
                 }
-                Err(e) => self.melding = format!("Feil ved lagring: {e}"),
+                Err(e) => self.status_msg = format!("Save failed: {e}"),
             }
         }
     }
 
-    fn lagre(&mut self) {
-        if self.sti.is_some() {
-            self.skriv();
+    fn save(&mut self) {
+        if self.path.is_some() {
+            self.write_file();
         } else {
-            self.lagre_som();
+            self.save_as();
         }
     }
 
-    fn lagre_som(&mut self) {
+    fn save_as(&mut self) {
         if let Some(p) = rfd::FileDialog::new()
-            .set_file_name(self.navn())
-            .add_filter("Tekstfiler", &["txt", "md", "ini", "toml", "conf", "cfg"])
-            .add_filter("Alle filer", &["*"])
+            .set_file_name(self.file_name())
+            .add_filter("Text files", &["txt", "md", "ini", "toml", "conf", "cfg"])
+            .add_filter("All files", &["*"])
             .save_file()
         {
-            self.sti = Some(p);
-            self.skriv();
+            self.path = Some(p);
+            self.write_file();
         }
     }
 
-    fn last(&mut self, ctx: &egui::Context, sti: Option<PathBuf>) {
-        let tekst = sti
+    fn load(&mut self, ctx: &egui::Context, path: Option<PathBuf>) {
+        let text = path
             .as_ref()
             .and_then(|p| std::fs::read_to_string(p).ok())
             .unwrap_or_default();
-        self.sti = sti;
-        self.lagret = tekst.clone();
-        self.tekst = tekst;
-        self.melding.clear();
-        self.velg(ctx, 0, 0);
+        self.path = path;
+        self.saved = text.clone();
+        self.text = text;
+        self.status_msg.clear();
+        self.select(ctx, 0, 0);
     }
 
-    fn aapne(&mut self, ctx: &egui::Context) {
-        if !self.sjekk_ulagret() {
+    fn open(&mut self, ctx: &egui::Context) {
+        if !self.confirm_unsaved() {
             return;
         }
         if let Some(p) = rfd::FileDialog::new()
-            .add_filter("Tekstfiler", &["txt", "md", "ini", "toml", "conf", "cfg"])
-            .add_filter("Alle filer", &["*"])
+            .add_filter("Text files", &["txt", "md", "ini", "toml", "conf", "cfg"])
+            .add_filter("All files", &["*"])
             .pick_file()
         {
-            self.last(ctx, Some(p));
+            self.load(ctx, Some(p));
         }
     }
 
-    fn ny_fil(&mut self, ctx: &egui::Context) {
-        if !self.sjekk_ulagret() {
+    fn new_file(&mut self, ctx: &egui::Context) {
+        if !self.confirm_unsaved() {
             return;
         }
-        self.last(ctx, None);
+        self.load(ctx, None);
     }
 
-    fn nytt_vindu(&mut self) {
+    fn new_window(&mut self) {
         match std::env::current_exe().and_then(|e| std::process::Command::new(e).spawn()) {
             Ok(_) => {}
-            Err(e) => self.melding = format!("Kunne ikke åpne nytt vindu: {e}"),
+            Err(e) => self.status_msg = format!("Could not open new window: {e}"),
         }
     }
 
-    fn skriv_ut(&mut self) {
+    fn print(&mut self) {
         let r = std::process::Command::new("lp")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
-            .and_then(|mut barn| {
-                barn.stdin.take().unwrap().write_all(self.tekst.as_bytes())?;
-                barn.wait()
+            .and_then(|mut child| {
+                child.stdin.take().unwrap().write_all(self.text.as_bytes())?;
+                child.wait()
             });
-        self.melding = match r {
-            Ok(s) if s.success() => "Sendt til skriver".into(),
-            _ => "Utskrift feilet (er «lp»/CUPS tilgjengelig?)".into(),
+        self.status_msg = match r {
+            Ok(s) if s.success() => "Sent to printer".into(),
+            _ => "Print failed (is lp/CUPS available?)".into(),
         };
     }
 
-    // Spør om å lagre ulagrede endringer. Returnerer false hvis brukeren avbryter.
-    fn sjekk_ulagret(&mut self) -> bool {
-        if !self.endret() {
+    // Ask about unsaved changes. Returns false if the user cancels.
+    fn confirm_unsaved(&mut self) -> bool {
+        if !self.is_dirty() {
             return true;
         }
         match rfd::MessageDialog::new()
             .set_title("Rustpad")
-            .set_description(format!("Vil du lagre endringene i {}?", self.navn()))
+            .set_description(format!("Do you want to save changes to {}?", self.file_name()))
             .set_buttons(rfd::MessageButtons::YesNoCancel)
             .show()
         {
             rfd::MessageDialogResult::Yes => {
-                self.lagre();
-                !self.endret() // false hvis lagringen ble avbrutt/feilet
+                self.save();
+                !self.is_dirty() // false if saving was cancelled or failed
             }
             rfd::MessageDialogResult::No => true,
             _ => false,
         }
     }
 
-    // ---------- markør ----------
+    // ---------- cursor ----------
 
-    fn markering(&self, ctx: &egui::Context) -> (usize, usize) {
+    fn selection(&self, ctx: &egui::Context) -> (usize, usize) {
         egui::TextEdit::load_state(ctx, editor_id())
             .and_then(|s| s.cursor.char_range())
             .map(|r| {
@@ -214,7 +214,7 @@ impl Pad {
             .unwrap_or((0, 0))
     }
 
-    fn velg(&self, ctx: &egui::Context, a: usize, b: usize) {
+    fn select(&self, ctx: &egui::Context, a: usize, b: usize) {
         let mut s = egui::TextEdit::load_state(ctx, editor_id()).unwrap_or_default();
         s.cursor.set_char_range(Some(egui::text::CCursorRange::two(
             egui::text::CCursor::new(a),
@@ -224,485 +224,487 @@ impl Pad {
         ctx.memory_mut(|m| m.request_focus(editor_id()));
     }
 
-    // send en hendelse til tekstfeltet (angre, klipp ut, lim inn …)
-    fn hendelse(&self, ctx: &egui::Context, e: egui::Event) {
+    // send an event to the text field (undo, cut, paste …)
+    fn send_event(&self, ctx: &egui::Context, e: egui::Event) {
         ctx.memory_mut(|m| m.request_focus(editor_id()));
         ctx.input_mut(|i| i.events.push(e));
     }
 
-    fn tast(&self, ctx: &egui::Context, key: egui::Key, modifiers: egui::Modifiers) {
-        self.hendelse(
+    fn send_key(&self, ctx: &egui::Context, key: egui::Key, modifiers: egui::Modifiers) {
+        self.send_event(
             ctx,
             egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers },
         );
     }
 
-    fn lim_inn(&self, ctx: &egui::Context) {
+    fn paste(&self, ctx: &egui::Context) {
         if let Ok(t) = arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
-            self.hendelse(ctx, egui::Event::Paste(t));
+            self.send_event(ctx, egui::Event::Paste(t));
         }
     }
 
-    fn sett_inn(&mut self, ctx: &egui::Context, s: &str) {
-        let (a, b) = self.markering(ctx);
-        let (ba, bb) = (byte(&self.tekst, a), byte(&self.tekst, b));
-        self.tekst.replace_range(ba..bb, s);
+    fn insert(&mut self, ctx: &egui::Context, s: &str) {
+        let (a, b) = self.selection(ctx);
+        let (ba, bb) = (byte_idx(&self.text, a), byte_idx(&self.text, b));
+        self.text.replace_range(ba..bb, s);
         let c = a + s.chars().count();
-        self.velg(ctx, c, c);
+        self.select(ctx, c, c);
     }
 
-    // ---------- søk og erstatt ----------
+    // ---------- find and replace ----------
 
-    fn finn(&mut self, ctx: &egui::Context, bakover: bool) {
-        if self.sok.is_empty() {
+    fn find(&mut self, ctx: &egui::Context, backwards: bool) {
+        if self.query.is_empty() {
             return;
         }
-        let skill = self.skill_store;
-        let norm = |c: char| if skill { c } else { sml(c) };
-        let t: Vec<char> = self.tekst.chars().map(norm).collect();
-        let s: Vec<char> = self.sok.chars().map(norm).collect();
-        let n = s.len();
-        let borte = format!("Fant ikke «{}»", self.sok);
+        let case = self.match_case;
+        let norm = |c: char| if case { c } else { lower(c) };
+        let t: Vec<char> = self.text.chars().map(norm).collect();
+        let q: Vec<char> = self.query.chars().map(norm).collect();
+        let n = q.len();
+        let not_found = format!("Cannot find \"{}\"", self.query);
         if n == 0 || n > t.len() {
-            self.melding = borte;
+            self.status_msg = not_found;
             return;
         }
-        let (start, slutt) = self.markering(ctx);
-        let siste = t.len() - n; // siste mulige startposisjon
-        let treff = |i: usize| t[i..i + n] == s[..];
-        let funn = if bakover {
-            (0..start.min(siste + 1))
+        let (start, end) = self.selection(ctx);
+        let last = t.len() - n; // last possible match position
+        let hit = |i: usize| t[i..i + n] == q[..];
+        let found = if backwards {
+            (0..start.min(last + 1))
                 .rev()
-                .find(|&i| treff(i))
-                .or_else(|| (start.min(siste + 1)..=siste).rev().find(|&i| treff(i)))
+                .find(|&i| hit(i))
+                .or_else(|| (start.min(last + 1)..=last).rev().find(|&i| hit(i)))
         } else {
-            (slutt..=siste)
-                .find(|&i| treff(i))
-                .or_else(|| (0..slutt.min(siste + 1)).find(|&i| treff(i)))
+            (end..=last)
+                .find(|&i| hit(i))
+                .or_else(|| (0..end.min(last + 1)).find(|&i| hit(i)))
         };
-        match funn {
+        match found {
             Some(i) => {
-                self.velg(ctx, i, i + n);
-                self.melding.clear();
+                self.select(ctx, i, i + n);
+                self.status_msg.clear();
             }
-            None => self.melding = borte,
+            None => self.status_msg = not_found,
         }
     }
 
-    fn erstatt_en(&mut self, ctx: &egui::Context) {
-        let (a, b) = self.markering(ctx);
+    fn replace_one(&mut self, ctx: &egui::Context) {
+        let (a, b) = self.selection(ctx);
         if a != b {
-            let valgt: String = self.tekst.chars().skip(a).take(b - a).collect();
-            let lik = if self.skill_store {
-                valgt == self.sok
+            let selected: String = self.text.chars().skip(a).take(b - a).collect();
+            let matches = if self.match_case {
+                selected == self.query
             } else {
-                valgt.chars().map(sml).eq(self.sok.chars().map(sml))
+                selected.chars().map(lower).eq(self.query.chars().map(lower))
             };
-            if lik {
-                let (ba, bb) = (byte(&self.tekst, a), byte(&self.tekst, b));
-                self.tekst.replace_range(ba..bb, &self.erstatt);
-                let c = a + self.erstatt.chars().count();
-                self.velg(ctx, c, c);
+            if matches {
+                let (ba, bb) = (byte_idx(&self.text, a), byte_idx(&self.text, b));
+                self.text.replace_range(ba..bb, &self.replacement);
+                let c = a + self.replacement.chars().count();
+                self.select(ctx, c, c);
             }
         }
-        self.finn(ctx, false);
+        self.find(ctx, false);
     }
 
-    fn erstatt_alle(&mut self, ctx: &egui::Context) {
-        if self.sok.is_empty() {
+    fn replace_all(&mut self, ctx: &egui::Context) {
+        if self.query.is_empty() {
             return;
         }
-        let skill = self.skill_store;
-        let norm = |c: char| if skill { c } else { sml(c) };
-        let t: Vec<char> = self.tekst.chars().collect();
+        let case = self.match_case;
+        let norm = |c: char| if case { c } else { lower(c) };
+        let t: Vec<char> = self.text.chars().collect();
         let tn: Vec<char> = t.iter().map(|&c| norm(c)).collect();
-        let s: Vec<char> = self.sok.chars().map(norm).collect();
-        let n = s.len();
-        let (mut ny, mut i, mut antall) = (String::new(), 0usize, 0usize);
+        let q: Vec<char> = self.query.chars().map(norm).collect();
+        let n = q.len();
+        let (mut out, mut i, mut count) = (String::new(), 0usize, 0usize);
         while i < t.len() {
-            if i + n <= t.len() && tn[i..i + n] == s[..] {
-                ny.push_str(&self.erstatt);
+            if i + n <= t.len() && tn[i..i + n] == q[..] {
+                out.push_str(&self.replacement);
                 i += n;
-                antall += 1;
+                count += 1;
             } else {
-                ny.push(t[i]);
+                out.push(t[i]);
                 i += 1;
             }
         }
-        if antall > 0 {
-            self.tekst = ny;
-            self.velg(ctx, 0, 0);
+        if count > 0 {
+            self.text = out;
+            self.select(ctx, 0, 0);
         }
-        self.melding = format!("Erstattet {antall} forekomst(er)");
+        self.status_msg = format!("Replaced {count} occurrence(s)");
     }
 
-    fn ga_til_linje(&mut self, ctx: &egui::Context) {
-        if let Ok(nr) = self.ga_til.trim().parse::<usize>() {
-            let maal = nr.max(1);
-            let (mut idx, mut linje) = (0usize, 1usize);
-            for c in self.tekst.chars() {
-                if linje == maal {
+    fn go_to_line(&mut self, ctx: &egui::Context) {
+        if let Ok(nr) = self.goto_input.trim().parse::<usize>() {
+            let target = nr.max(1);
+            let (mut idx, mut line) = (0usize, 1usize);
+            for c in self.text.chars() {
+                if line == target {
                     break;
                 }
                 idx += 1;
                 if c == '\n' {
-                    linje += 1;
+                    line += 1;
                 }
             }
-            if linje < maal {
-                self.melding = format!("Dokumentet har bare {linje} linjer");
+            if line < target {
+                self.status_msg = format!("The document only has {line} lines");
             }
-            self.velg(ctx, idx, idx);
+            self.select(ctx, idx, idx);
         }
-        self.vis_ga_til = false;
+        self.show_goto = false;
     }
 
-    // ---------- hurtigtaster ----------
+    // ---------- keyboard shortcuts ----------
 
-    fn hurtigtaster(&mut self, ctx: &egui::Context) {
+    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         use egui::{Key, Modifiers as M};
-        let sn = egui::KeyboardShortcut::new;
-        // Shift-variantene sjekkes først så de ikke slukes av de enkle
-        if ctx.input_mut(|i| i.consume_shortcut(&sn(M::CTRL | M::SHIFT, Key::S))) {
-            self.lagre_som();
+        let sc = egui::KeyboardShortcut::new;
+        // check the Shift variants first so the plain ones don't swallow them
+        if ctx.input_mut(|i| i.consume_shortcut(&sc(M::CTRL | M::SHIFT, Key::S))) {
+            self.save_as();
         }
-        if ctx.input_mut(|i| i.consume_shortcut(&sn(M::CTRL | M::SHIFT, Key::N))) {
-            self.nytt_vindu();
+        if ctx.input_mut(|i| i.consume_shortcut(&sc(M::CTRL | M::SHIFT, Key::N))) {
+            self.new_window();
         }
-        if ctx.input_mut(|i| i.consume_shortcut(&sn(M::SHIFT, Key::F3))) {
-            self.finn(ctx, true);
+        if ctx.input_mut(|i| i.consume_shortcut(&sc(M::SHIFT, Key::F3))) {
+            self.find(ctx, true);
         }
-        if ctx.input_mut(|i| i.consume_shortcut(&sn(M::CTRL, Key::S))) {
-            self.lagre();
+        if ctx.input_mut(|i| i.consume_shortcut(&sc(M::CTRL, Key::S))) {
+            self.save();
         }
-        if ctx.input_mut(|i| i.consume_shortcut(&sn(M::CTRL, Key::N))) {
-            self.ny_fil(ctx);
+        if ctx.input_mut(|i| i.consume_shortcut(&sc(M::CTRL, Key::N))) {
+            self.new_file(ctx);
         }
-        if ctx.input_mut(|i| i.consume_shortcut(&sn(M::CTRL, Key::O))) {
-            self.aapne(ctx);
+        if ctx.input_mut(|i| i.consume_shortcut(&sc(M::CTRL, Key::O))) {
+            self.open(ctx);
         }
-        if ctx.input_mut(|i| i.consume_shortcut(&sn(M::CTRL, Key::P))) {
-            self.skriv_ut();
+        if ctx.input_mut(|i| i.consume_shortcut(&sc(M::CTRL, Key::P))) {
+            self.print();
         }
-        if ctx.input_mut(|i| i.consume_shortcut(&sn(M::CTRL, Key::Q))) {
+        if ctx.input_mut(|i| i.consume_shortcut(&sc(M::CTRL, Key::Q))) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
-        if ctx.input_mut(|i| i.consume_shortcut(&sn(M::CTRL, Key::F))) {
-            self.vis_sok = true;
-            self.fokus_sok = true;
+        if ctx.input_mut(|i| i.consume_shortcut(&sc(M::CTRL, Key::F))) {
+            self.show_find = true;
+            self.focus_find = true;
         }
-        if ctx.input_mut(|i| i.consume_shortcut(&sn(M::CTRL, Key::H))) {
-            self.vis_sok = true;
-            self.vis_erstatt = true;
-            self.fokus_sok = true;
+        if ctx.input_mut(|i| i.consume_shortcut(&sc(M::CTRL, Key::H))) {
+            self.show_find = true;
+            self.show_replace = true;
+            self.focus_find = true;
         }
-        if ctx.input_mut(|i| i.consume_shortcut(&sn(M::CTRL, Key::G))) {
-            self.vis_ga_til = true;
+        if ctx.input_mut(|i| i.consume_shortcut(&sc(M::CTRL, Key::G))) {
+            self.show_goto = true;
         }
-        if ctx.input_mut(|i| i.consume_shortcut(&sn(M::CTRL, Key::M))) {
-            self.vis_md = !self.vis_md;
+        if ctx.input_mut(|i| i.consume_shortcut(&sc(M::CTRL, Key::M))) {
+            self.show_md = !self.show_md;
         }
-        if ctx.input_mut(|i| i.consume_shortcut(&sn(M::NONE, Key::F3))) {
-            self.finn(ctx, false);
+        if ctx.input_mut(|i| i.consume_shortcut(&sc(M::NONE, Key::F3))) {
+            self.find(ctx, false);
         }
-        if ctx.input_mut(|i| i.consume_shortcut(&sn(M::NONE, Key::F5))) {
-            let naa = chrono::Local::now().format("%H:%M %d.%m.%Y").to_string();
-            self.sett_inn(ctx, &naa);
+        if ctx.input_mut(|i| i.consume_shortcut(&sc(M::NONE, Key::F5))) {
+            let now = chrono::Local::now().format("%H:%M %Y-%m-%d").to_string();
+            self.insert(ctx, &now);
         }
-        if ctx.input(|i| i.key_pressed(Key::Escape)) && !self.vis_ga_til {
-            self.vis_sok = false;
-            self.vis_erstatt = false;
+        if ctx.input(|i| i.key_pressed(Key::Escape)) && !self.show_goto {
+            self.show_find = false;
+            self.show_replace = false;
         }
     }
 }
 
-impl eframe::App for Pad {
+impl eframe::App for Notepad {
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        self.hurtigtaster(&ctx);
+        self.handle_shortcuts(&ctx);
 
-        // Spør om lagring når vinduet lukkes med ulagrede endringer
-        if ctx.input(|i| i.viewport().close_requested()) && !self.lukk_ok {
-            if self.sjekk_ulagret() {
-                self.lukk_ok = true;
+        // ask about saving when the window closes with unsaved changes
+        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close {
+            if self.confirm_unsaved() {
+                self.allow_close = true;
             } else {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             }
         }
 
-        // Vindustittel som i Notepad: "fil.txt* – Rustpad"
-        let stjerne = if self.endret() { "*" } else { "" };
+        // window title like Notepad: "file.txt* – Rustpad"
+        let star = if self.is_dirty() { "*" } else { "" };
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
-            "{}{stjerne} – Rustpad",
-            self.navn()
+            "{}{star} – Rustpad",
+            self.file_name()
         )));
 
-        // ---------- menylinje ----------
-        egui::Panel::top("meny").show(ui, |ui| {
+        // ---------- menu bar ----------
+        egui::Panel::top("menu").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
-                let knapp = |t: &str, s: &str| egui::Button::new(t).shortcut_text(s.to_owned());
-                ui.menu_button("Fil", |ui| {
-                    if ui.add(knapp("Ny", "Ctrl+N")).clicked() {
-                        self.ny_fil(&ctx);
+                let btn = |t: &str, s: &str| egui::Button::new(t).shortcut_text(s.to_owned());
+                ui.menu_button("File", |ui| {
+                    if ui.add(btn("New", "Ctrl+N")).clicked() {
+                        self.new_file(&ctx);
                     }
-                    if ui.add(knapp("Nytt vindu", "Ctrl+Shift+N")).clicked() {
-                        self.nytt_vindu();
+                    if ui.add(btn("New Window", "Ctrl+Shift+N")).clicked() {
+                        self.new_window();
                     }
-                    if ui.add(knapp("Åpne…", "Ctrl+O")).clicked() {
-                        self.aapne(&ctx);
-                    }
-                    ui.separator();
-                    if ui.add(knapp("Lagre", "Ctrl+S")).clicked() {
-                        self.lagre();
-                    }
-                    if ui.add(knapp("Lagre som…", "Ctrl+Shift+S")).clicked() {
-                        self.lagre_som();
+                    if ui.add(btn("Open…", "Ctrl+O")).clicked() {
+                        self.open(&ctx);
                     }
                     ui.separator();
-                    if ui.add(knapp("Skriv ut", "Ctrl+P")).clicked() {
-                        self.skriv_ut();
+                    if ui.add(btn("Save", "Ctrl+S")).clicked() {
+                        self.save();
+                    }
+                    if ui.add(btn("Save As…", "Ctrl+Shift+S")).clicked() {
+                        self.save_as();
                     }
                     ui.separator();
-                    if ui.add(knapp("Avslutt", "Ctrl+Q")).clicked() {
+                    if ui.add(btn("Print", "Ctrl+P")).clicked() {
+                        self.print();
+                    }
+                    ui.separator();
+                    if ui.add(btn("Exit", "Ctrl+Q")).clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 });
-                ui.menu_button("Rediger", |ui| {
+                ui.menu_button("Edit", |ui| {
                     use egui::{Event, Key, Modifiers as M};
-                    if ui.add(knapp("Angre", "Ctrl+Z")).clicked() {
-                        self.tast(&ctx, Key::Z, M::CTRL);
+                    if ui.add(btn("Undo", "Ctrl+Z")).clicked() {
+                        self.send_key(&ctx, Key::Z, M::CTRL);
                     }
-                    if ui.add(knapp("Gjør om", "Ctrl+Shift+Z")).clicked() {
-                        self.tast(&ctx, Key::Z, M::CTRL | M::SHIFT);
-                    }
-                    ui.separator();
-                    if ui.add(knapp("Klipp ut", "Ctrl+X")).clicked() {
-                        self.hendelse(&ctx, Event::Cut);
-                    }
-                    if ui.add(knapp("Kopier", "Ctrl+C")).clicked() {
-                        self.hendelse(&ctx, Event::Copy);
-                    }
-                    if ui.add(knapp("Lim inn", "Ctrl+V")).clicked() {
-                        self.lim_inn(&ctx);
-                    }
-                    if ui.add(knapp("Slett", "Del")).clicked() {
-                        self.tast(&ctx, Key::Delete, M::NONE);
+                    if ui.add(btn("Redo", "Ctrl+Shift+Z")).clicked() {
+                        self.send_key(&ctx, Key::Z, M::CTRL | M::SHIFT);
                     }
                     ui.separator();
-                    if ui.add(knapp("Finn…", "Ctrl+F")).clicked() {
-                        self.vis_sok = true;
-                        self.fokus_sok = true;
+                    if ui.add(btn("Cut", "Ctrl+X")).clicked() {
+                        self.send_event(&ctx, Event::Cut);
                     }
-                    if ui.add(knapp("Finn neste", "F3")).clicked() {
-                        self.finn(&ctx, false);
+                    if ui.add(btn("Copy", "Ctrl+C")).clicked() {
+                        self.send_event(&ctx, Event::Copy);
                     }
-                    if ui.add(knapp("Finn forrige", "Shift+F3")).clicked() {
-                        self.finn(&ctx, true);
+                    if ui.add(btn("Paste", "Ctrl+V")).clicked() {
+                        self.paste(&ctx);
                     }
-                    if ui.add(knapp("Erstatt…", "Ctrl+H")).clicked() {
-                        self.vis_sok = true;
-                        self.vis_erstatt = true;
-                        self.fokus_sok = true;
-                    }
-                    if ui.add(knapp("Gå til…", "Ctrl+G")).clicked() {
-                        self.vis_ga_til = true;
+                    if ui.add(btn("Delete", "Del")).clicked() {
+                        self.send_key(&ctx, Key::Delete, M::NONE);
                     }
                     ui.separator();
-                    if ui.add(knapp("Merk alt", "Ctrl+A")).clicked() {
-                        self.velg(&ctx, 0, self.tekst.chars().count());
+                    if ui.add(btn("Find…", "Ctrl+F")).clicked() {
+                        self.show_find = true;
+                        self.focus_find = true;
                     }
-                    if ui.add(knapp("Klokkeslett/dato", "F5")).clicked() {
-                        let naa = chrono::Local::now().format("%H:%M %d.%m.%Y").to_string();
-                        self.sett_inn(&ctx, &naa);
+                    if ui.add(btn("Find Next", "F3")).clicked() {
+                        self.find(&ctx, false);
+                    }
+                    if ui.add(btn("Find Previous", "Shift+F3")).clicked() {
+                        self.find(&ctx, true);
+                    }
+                    if ui.add(btn("Replace…", "Ctrl+H")).clicked() {
+                        self.show_find = true;
+                        self.show_replace = true;
+                        self.focus_find = true;
+                    }
+                    if ui.add(btn("Go To…", "Ctrl+G")).clicked() {
+                        self.show_goto = true;
+                    }
+                    ui.separator();
+                    if ui.add(btn("Select All", "Ctrl+A")).clicked() {
+                        self.select(&ctx, 0, self.text.chars().count());
+                    }
+                    if ui.add(btn("Time/Date", "F5")).clicked() {
+                        let now = chrono::Local::now().format("%H:%M %Y-%m-%d").to_string();
+                        self.insert(&ctx, &now);
                     }
                 });
                 ui.menu_button("Format", |ui| {
-                    ui.checkbox(&mut self.ordbryting, "Ordbryting");
+                    ui.checkbox(&mut self.word_wrap, "Word Wrap");
                     ui.separator();
-                    if ui.button("Større skrift").clicked() {
-                        self.skrift = (self.skrift + 2.0).min(40.0);
+                    if ui.button("Larger Font").clicked() {
+                        self.font_size = (self.font_size + 2.0).min(40.0);
                     }
-                    if ui.button("Mindre skrift").clicked() {
-                        self.skrift = (self.skrift - 2.0).max(8.0);
+                    if ui.button("Smaller Font").clicked() {
+                        self.font_size = (self.font_size - 2.0).max(8.0);
                     }
-                    if ui.button("Standard skrift").clicked() {
-                        self.skrift = 14.0;
+                    if ui.button("Default Font Size").clicked() {
+                        self.font_size = 14.0;
                     }
                 });
-                ui.menu_button("Vis", |ui| {
-                    if ui.add(knapp("Zoom inn", "Ctrl++")).clicked() {
+                ui.menu_button("View", |ui| {
+                    if ui.add(btn("Zoom In", "Ctrl++")).clicked() {
                         ctx.set_zoom_factor(ctx.zoom_factor() * 1.1);
                     }
-                    if ui.add(knapp("Zoom ut", "Ctrl+-")).clicked() {
+                    if ui.add(btn("Zoom Out", "Ctrl+-")).clicked() {
                         ctx.set_zoom_factor(ctx.zoom_factor() / 1.1);
                     }
-                    if ui.add(knapp("Standard zoom", "Ctrl+0")).clicked() {
+                    if ui.add(btn("Reset Zoom", "Ctrl+0")).clicked() {
                         ctx.set_zoom_factor(1.0);
                     }
                     ui.separator();
-                    ui.checkbox(&mut self.vis_status, "Statuslinje");
+                    ui.checkbox(&mut self.show_status, "Status Bar");
                     if ui
-                        .add(egui::Button::selectable(self.vis_md, "Markdown-visning").shortcut_text("Ctrl+M"))
+                        .add(egui::Button::selectable(self.show_md, "Markdown Preview").shortcut_text("Ctrl+M"))
                         .clicked()
                     {
-                        self.vis_md = !self.vis_md;
+                        self.show_md = !self.show_md;
                     }
                 });
             });
         });
 
-        // ---------- søkefelt ----------
-        if self.vis_sok {
-            egui::Panel::top("sokefelt").show(ui, |ui| {
+        // ---------- find bar ----------
+        if self.show_find {
+            egui::Panel::top("find_bar").show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label("Finn:");
-                    let felt = ui.add(egui::TextEdit::singleline(&mut self.sok).desired_width(180.0));
-                    if self.fokus_sok {
-                        felt.request_focus();
-                        self.fokus_sok = false;
+                    ui.label("Find:");
+                    let field = ui.add(egui::TextEdit::singleline(&mut self.query).desired_width(180.0));
+                    if self.focus_find {
+                        field.request_focus();
+                        self.focus_find = false;
                     }
-                    if felt.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        self.finn(&ctx, false);
-                        felt.request_focus();
+                    if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        self.find(&ctx, false);
+                        field.request_focus();
                     }
-                    if ui.button("Neste").clicked() {
-                        self.finn(&ctx, false);
+                    if ui.button("Next").clicked() {
+                        self.find(&ctx, false);
                     }
-                    if ui.button("Forrige").clicked() {
-                        self.finn(&ctx, true);
+                    if ui.button("Previous").clicked() {
+                        self.find(&ctx, true);
                     }
-                    ui.checkbox(&mut self.skill_store, "Skill store/små");
+                    ui.checkbox(&mut self.match_case, "Match case");
                     if ui.button("✕").clicked() {
-                        self.vis_sok = false;
-                        self.vis_erstatt = false;
+                        self.show_find = false;
+                        self.show_replace = false;
                     }
                 });
-                if self.vis_erstatt {
+                if self.show_replace {
                     ui.horizontal(|ui| {
-                        ui.label("Erstatt med:");
-                        ui.add(egui::TextEdit::singleline(&mut self.erstatt).desired_width(180.0));
-                        if ui.button("Erstatt").clicked() {
-                            self.erstatt_en(&ctx);
+                        ui.label("Replace with:");
+                        ui.add(egui::TextEdit::singleline(&mut self.replacement).desired_width(180.0));
+                        if ui.button("Replace").clicked() {
+                            self.replace_one(&ctx);
                         }
-                        if ui.button("Erstatt alle").clicked() {
-                            self.erstatt_alle(&ctx);
+                        if ui.button("Replace All").clicked() {
+                            self.replace_all(&ctx);
                         }
                     });
                 }
             });
         }
 
-        // ---------- gå til linje ----------
-        if self.vis_ga_til {
-            egui::Window::new("Gå til linje")
+        // ---------- go to line ----------
+        if self.show_goto {
+            egui::Window::new("Go to line")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(&ctx, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label("Linjenummer:");
-                        ui.add(egui::TextEdit::singleline(&mut self.ga_til).desired_width(80.0))
+                        ui.label("Line number:");
+                        ui.add(egui::TextEdit::singleline(&mut self.goto_input).desired_width(80.0))
                             .request_focus();
                     });
                     ui.horizontal(|ui| {
-                        if ui.button("Gå til").clicked()
+                        if ui.button("Go").clicked()
                             || ui.input(|i| i.key_pressed(egui::Key::Enter))
                         {
-                            self.ga_til_linje(&ctx);
+                            self.go_to_line(&ctx);
                         }
-                        if ui.button("Avbryt").clicked()
+                        if ui.button("Cancel").clicked()
                             || ui.input(|i| i.key_pressed(egui::Key::Escape))
                         {
-                            self.vis_ga_til = false;
+                            self.show_goto = false;
                         }
                     });
                 });
         }
 
-        // ---------- statuslinje ----------
-        if self.vis_status {
+        // ---------- status bar ----------
+        if self.show_status {
             egui::Panel::bottom("status").show(ui, |ui| {
-                let kur = egui::TextEdit::load_state(&ctx, editor_id())
+                let cur = egui::TextEdit::load_state(&ctx, editor_id())
                     .and_then(|s| s.cursor.char_range())
                     .map(|r| r.primary.index.0)
                     .unwrap_or(0);
-                let (mut ln, mut kol) = (1usize, 1usize);
-                for (i, c) in self.tekst.chars().enumerate() {
-                    if i == kur {
+                let (mut ln, mut col) = (1usize, 1usize);
+                for (i, c) in self.text.chars().enumerate() {
+                    if i == cur {
                         break;
                     }
                     if c == '\n' {
                         ln += 1;
-                        kol = 1;
+                        col = 1;
                     } else {
-                        kol += 1;
+                        col += 1;
                     }
                 }
                 ui.horizontal(|ui| {
-                    ui.label(format!("Ln {ln}, Kol {kol}"));
+                    ui.label(format!("Ln {ln}, Col {col}"));
                     ui.separator();
                     ui.label(format!(
-                        "{} linjer  {} tegn",
-                        self.tekst.lines().count().max(1),
-                        self.tekst.chars().count()
+                        "{} lines  {} chars",
+                        self.text.lines().count().max(1),
+                        self.text.chars().count()
                     ));
                     ui.separator();
                     ui.label(format!("{:.0} %", ctx.zoom_factor() * 100.0));
                     ui.separator();
-                    ui.label(if self.tekst.contains('\r') { "CRLF" } else { "LF" });
+                    ui.label(if self.text.contains('\r') { "CRLF" } else { "LF" });
                     ui.separator();
                     ui.label("UTF-8");
                     ui.separator();
-                    ui.label(if self.endret() { "Endret" } else { "Lagret" });
-                    if !self.melding.is_empty() {
+                    ui.label(if self.is_dirty() { "Modified" } else { "Saved" });
+                    if !self.status_msg.is_empty() {
                         ui.separator();
-                        ui.label(&self.melding);
+                        ui.label(&self.status_msg);
                     }
                 });
             });
         }
 
-        // ---------- selve tekstfeltet ----------
-        let (ordbryt, skrift) = (self.ordbryting, self.skrift);
-        let mut oppsett = move |ui: &egui::Ui, buf: &dyn egui::TextBuffer, bredde: f32| {
-            let jobb = egui::text::LayoutJob::simple(
-                buf.as_str().to_owned(),
-                egui::FontId::monospace(skrift),
-                ui.visuals().text_color(),
-                if ordbryt { bredde } else { f32::INFINITY },
-            );
-            ui.ctx().fonts_mut(|f| f.layout_job(jobb))
-        };
-        if self.vis_md {
+        // ---------- markdown preview ----------
+        if self.show_md {
             egui::CentralPanel::default().show(ui, |ui| {
                 egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                     egui_commonmark::CommonMarkViewer::new().show(
                         ui,
                         &mut self.md_cache,
-                        &self.tekst,
+                        &self.text,
                     );
                 });
             });
             return;
         }
+
+        // ---------- the text editor itself ----------
+        let (wrap, font_size) = (self.word_wrap, self.font_size);
+        let mut layouter = move |ui: &egui::Ui, buf: &dyn egui::TextBuffer, width: f32| {
+            let job = egui::text::LayoutJob::simple(
+                buf.as_str().to_owned(),
+                egui::FontId::monospace(font_size),
+                ui.visuals().text_color(),
+                if wrap { width } else { f32::INFINITY },
+            );
+            ui.ctx().fonts_mut(|f| f.layout_job(job))
+        };
         egui::CentralPanel::default().show(ui, |ui| {
-            // TextEdit høydeberegnes fra antall rader, så regn ut hvor mange som fyller panelet
-            let rad_h = ui.ctx().fonts_mut(|f| f.row_height(&egui::FontId::monospace(skrift)));
-            let rader = (ui.available_height() / rad_h).ceil().max(1.0) as usize;
-            let rulle = if ordbryt {
+            // TextEdit sizes itself from a row count, so compute how many rows fill the panel
+            let row_h = ui.ctx().fonts_mut(|f| f.row_height(&egui::FontId::monospace(font_size)));
+            let rows = (ui.available_height() / row_h).ceil().max(1.0) as usize;
+            let scroll = if wrap {
                 egui::ScrollArea::vertical()
             } else {
                 egui::ScrollArea::both()
             };
-            rulle.auto_shrink(false).show(ui, |ui| {
-                let felt = egui::TextEdit::multiline(&mut self.tekst)
+            scroll.auto_shrink(false).show(ui, |ui| {
+                let edit = egui::TextEdit::multiline(&mut self.text)
                     .id(editor_id())
-                    .font(egui::FontId::monospace(skrift))
+                    .font(egui::FontId::monospace(font_size))
                     .desired_width(f32::INFINITY)
-                    .desired_rows(rader)
-                    .layouter(&mut oppsett);
-                if ui.add(felt).changed() {
-                    self.melding.clear();
+                    .desired_rows(rows)
+                    .layouter(&mut layouter);
+                if ui.add(edit).changed() {
+                    self.status_msg.clear();
                 }
             });
         });
@@ -710,87 +712,88 @@ impl eframe::App for Pad {
 }
 
 #[cfg(test)]
-mod tester {
+mod tests {
     use super::*;
 
-    fn pad(tekst: &str) -> (Pad, egui::Context) {
-        let mut p = Pad::ny(None);
-        p.tekst = tekst.into();
+    fn pad(text: &str) -> (Notepad, egui::Context) {
+        let mut p = Notepad::new(None);
+        p.text = text.into();
         (p, egui::Context::default())
     }
 
     #[test]
-    fn finn_uten_skille_paa_store_smaa() {
-        let (mut p, ctx) = pad("Hei verden, hei igjen");
-        p.sok = "HEI".into();
-        p.finn(&ctx, false);
-        assert_eq!(p.markering(&ctx), (0, 3));
-        p.finn(&ctx, false); // neste treff
-        assert_eq!(p.markering(&ctx), (12, 15));
-        p.finn(&ctx, false); // rundt til starten igjen
-        assert_eq!(p.markering(&ctx), (0, 3));
+    fn find_case_insensitive() {
+        let (mut p, ctx) = pad("Hello world, hello again");
+        p.query = "HELLO".into();
+        p.find(&ctx, false);
+        assert_eq!(p.selection(&ctx), (0, 5));
+        p.find(&ctx, false); // next match
+        assert_eq!(p.selection(&ctx), (13, 18));
+        p.find(&ctx, false); // wraps around to the start
+        assert_eq!(p.selection(&ctx), (0, 5));
     }
 
     #[test]
-    fn finn_bakover_og_med_skille() {
+    fn find_backwards_and_case_sensitive() {
         let (mut p, ctx) = pad("abc ABC abc");
-        p.sok = "ABC".into();
-        p.skill_store = true;
-        p.finn(&ctx, false);
-        assert_eq!(p.markering(&ctx), (4, 7));
-        p.skill_store = false;
-        p.finn(&ctx, true); // bakover fra posisjon 4
-        assert_eq!(p.markering(&ctx), (0, 3));
+        p.query = "ABC".into();
+        p.match_case = true;
+        p.find(&ctx, false);
+        assert_eq!(p.selection(&ctx), (4, 7));
+        p.match_case = false;
+        p.find(&ctx, true); // backwards from position 4
+        assert_eq!(p.selection(&ctx), (0, 3));
     }
 
     #[test]
-    fn finn_haandterer_norske_tegn() {
+    fn find_handles_non_ascii() {
+        // Norwegian text exercises multi-byte UTF-8 chars
         let (mut p, ctx) = pad("Blåbærsyltetøy og blåbær");
-        p.sok = "BLÅBÆR".into();
-        p.finn(&ctx, false);
-        assert_eq!(p.markering(&ctx), (0, 6));
-        let (a, b) = p.markering(&ctx);
-        let valgt: String = p.tekst.chars().skip(a).take(b - a).collect();
-        assert_eq!(valgt, "Blåbær");
+        p.query = "BLÅBÆR".into();
+        p.find(&ctx, false);
+        assert_eq!(p.selection(&ctx), (0, 6));
+        let (a, b) = p.selection(&ctx);
+        let selected: String = p.text.chars().skip(a).take(b - a).collect();
+        assert_eq!(selected, "Blåbær");
     }
 
     #[test]
-    fn erstatt_alle_teller_riktig() {
-        let (mut p, ctx) = pad("epler og Epler og EPLER");
-        p.sok = "epler".into();
-        p.erstatt = "pærer".into();
-        p.erstatt_alle(&ctx);
-        assert_eq!(p.tekst, "pærer og pærer og pærer");
-        assert_eq!(p.melding, "Erstattet 3 forekomst(er)");
+    fn replace_all_counts_matches() {
+        let (mut p, ctx) = pad("apples and Apples and APPLES");
+        p.query = "apples".into();
+        p.replacement = "pears".into();
+        p.replace_all(&ctx);
+        assert_eq!(p.text, "pears and pears and pears");
+        assert_eq!(p.status_msg, "Replaced 3 occurrence(s)");
     }
 
     #[test]
-    fn erstatt_en_bytter_markert_treff() {
-        let (mut p, ctx) = pad("en to en");
-        p.sok = "en".into();
-        p.erstatt = "tre".into();
-        p.finn(&ctx, false); // markerer første "en"
-        p.erstatt_en(&ctx);
-        assert_eq!(p.tekst, "tre to en");
-        assert_eq!(p.markering(&ctx), (7, 9)); // neste treff markert
+    fn replace_one_swaps_selected_match() {
+        let (mut p, ctx) = pad("one two one");
+        p.query = "one".into();
+        p.replacement = "three".into();
+        p.find(&ctx, false); // selects the first "one"
+        p.replace_one(&ctx);
+        assert_eq!(p.text, "three two one");
+        assert_eq!(p.selection(&ctx), (10, 13)); // next match selected
     }
 
     #[test]
-    fn ga_til_riktig_linje() {
-        let (mut p, ctx) = pad("linje1\nlinje2\nlinje3");
-        p.ga_til = "3".into();
-        p.vis_ga_til = true;
-        p.ga_til_linje(&ctx);
-        assert_eq!(p.markering(&ctx), (14, 14));
-        assert!(!p.vis_ga_til);
+    fn go_to_correct_line() {
+        let (mut p, ctx) = pad("line1\nline2\nline3");
+        p.goto_input = "3".into();
+        p.show_goto = true;
+        p.go_to_line(&ctx);
+        assert_eq!(p.selection(&ctx), (12, 12));
+        assert!(!p.show_goto);
     }
 
     #[test]
-    fn sett_inn_erstatter_markering() {
-        let (mut p, ctx) = pad("god morgen");
-        p.velg(&ctx, 4, 10); // markerer "morgen"
-        p.sett_inn(&ctx, "kveld");
-        assert_eq!(p.tekst, "god kveld");
-        assert_eq!(p.markering(&ctx), (9, 9));
+    fn insert_replaces_selection() {
+        let (mut p, ctx) = pad("good morning");
+        p.select(&ctx, 5, 12); // selects "morning"
+        p.insert(&ctx, "evening");
+        assert_eq!(p.text, "good evening");
+        assert_eq!(p.selection(&ctx), (12, 12));
     }
 }

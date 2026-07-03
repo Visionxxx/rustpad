@@ -1,47 +1,47 @@
 # Rustpad
 
-Enkel notisblokk skrevet i Rust – i to utgaver:
+A simple notepad written in Rust – in two flavors:
 
-- **`rustpad`** – terminalversjon (crossterm), minimal og rask
-- **`rustpad-gui`** – grafisk versjon à la Notepad (eframe/egui)
+- **`rustpad`** – terminal version (crossterm), minimal and fast
+- **`rustpad-gui`** – graphical Notepad-style version (eframe/egui)
 
-## Funksjoner (GUI)
+## Features (GUI)
 
-- Fil: Ny, Nytt vindu, Åpne, Lagre, Lagre som, Skriv ut (via `lp`/CUPS)
-- Rediger: Angre/Gjør om, Klipp ut/Kopier/Lim inn, Finn/Erstatt, Gå til linje, Klokkeslett/dato
-- Format: Ordbryting, skriftstørrelse
-- Vis: Zoom, statuslinje, **Markdown-visning** (Ctrl+M) med ferdig rendret tekst
-- Statuslinje med linje/kolonne, zoom, linjeskifttype og UTF-8
-- Spør om lagring ved lukking med ulagrede endringer
+- File: New, New Window, Open, Save, Save As, Print (via `lp`/CUPS)
+- Edit: Undo/Redo, Cut/Copy/Paste, Find/Replace, Go To line, Time/Date
+- Format: Word wrap, font size
+- View: Zoom, status bar, **Markdown preview** (Ctrl+M) with fully rendered text
+- Status bar with line/column, zoom, line-ending type and UTF-8
+- Prompts to save when closing with unsaved changes
 
-## Hurtigtaster
+## Keyboard shortcuts
 
-| Tast | Handling |
-|------|----------|
-| Ctrl+N / Ctrl+Shift+N | Ny fil / nytt vindu |
-| Ctrl+O | Åpne |
-| Ctrl+S / Ctrl+Shift+S | Lagre / lagre som |
-| Ctrl+P | Skriv ut |
-| Ctrl+F / F3 / Shift+F3 | Finn / finn neste / forrige |
-| Ctrl+H | Erstatt |
-| Ctrl+G | Gå til linje |
-| F5 | Sett inn klokkeslett/dato |
-| Ctrl+M | Markdown-visning av/på |
-| Ctrl+Q | Avslutt |
+| Key | Action |
+|-----|--------|
+| Ctrl+N / Ctrl+Shift+N | New file / new window |
+| Ctrl+O | Open |
+| Ctrl+S / Ctrl+Shift+S | Save / save as |
+| Ctrl+P | Print |
+| Ctrl+F / F3 / Shift+F3 | Find / find next / previous |
+| Ctrl+H | Replace |
+| Ctrl+G | Go to line |
+| F5 | Insert time/date |
+| Ctrl+M | Toggle markdown preview |
+| Ctrl+Q | Exit |
 
-Terminalversjonen bruker ^S=lagre, ^P=markdown-forhåndsvisning, ^Q=avslutt.
+The terminal version uses ^S=save, ^P=markdown preview, ^Q=quit.
 
-## Bygg og installasjon
+## Build and install
 
 ```sh
 cargo install --path .
 ```
 
-Installerer både `rustpad` og `rustpad-gui` til `~/.cargo/bin`.
+Installs both `rustpad` and `rustpad-gui` to `~/.cargo/bin`.
 
-Kjør med valgfritt filnavn: `rustpad-gui notat.md`
+Run with an optional file name: `rustpad-gui notes.md`
 
-## Tester
+## Tests
 
 ```sh
 cargo test --bin rustpad-gui
