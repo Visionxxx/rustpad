@@ -15,7 +15,7 @@ path = "gui.rs"
 arboard = "3.6.1"
 chrono = "0.4.45"
 crossterm = "0.27"
-eframe = "0.35.0"
+eframe = { version = "0.35.0", features = ["persistence"] }
 egui_commonmark = "0.24.0"
 rfd = "0.17.2"
 

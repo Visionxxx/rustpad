@@ -22,7 +22,8 @@ fn main() -> eframe::Result {
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([900.0, 600.0])
-            .with_min_inner_size([300.0, 200.0]),
+            .with_min_inner_size([300.0, 200.0])
+            .with_icon(app_icon()),
         ..Default::default()
     };
     eframe::run_native(
@@ -30,9 +31,78 @@ fn main() -> eframe::Result {
         opts,
         Box::new(|cc| {
             configure_focus(&cc.egui_ctx);
-            Ok(Box::new(Notepad::new(file)))
+            Ok(Box::new(Notepad::new(file).restore(cc.storage)))
         }),
     )
+}
+
+// A little rust-colored notepad icon (rounded square with text lines),
+// drawn procedurally so we don't need an image-decoding dependency.
+fn app_icon() -> egui::IconData {
+    const S: usize = 64;
+    let corner_r = 12.0f32;
+    let mut rgba = Vec::with_capacity(S * S * 4);
+    for y in 0..S {
+        for x in 0..S {
+            let (xf, yf) = (x as f32 + 0.5, y as f32 + 0.5);
+            // distance to the rounded-square outline
+            let cx = xf.clamp(corner_r, S as f32 - corner_r);
+            let cy = yf.clamp(corner_r, S as f32 - corner_r);
+            let inside = (xf - cx).hypot(yf - cy) <= corner_r;
+            let line = matches!(y, 17..=21 | 29..=33 | 41..=45) && (12..=51).contains(&x);
+            let short = y >= 41 && x > 38; // last text line is shorter
+            let px: [u8; 4] = if !inside {
+                [0, 0, 0, 0]
+            } else if line && !short {
+                [255, 243, 231, 255] // cream text lines
+            } else {
+                [183, 65, 14, 255] // rust
+            };
+            rgba.extend_from_slice(&px);
+        }
+    }
+    egui::IconData { rgba, width: S as u32, height: S as u32 }
+}
+
+// Read a file as UTF-8, falling back to Latin-1 (ISO-8859-1) so legacy
+// files don't silently open as an empty document.
+fn read_text(p: &std::path::Path) -> std::io::Result<(String, &'static str)> {
+    let bytes = std::fs::read(p)?;
+    match String::from_utf8(bytes) {
+        Ok(s) => Ok((s, "UTF-8")),
+        Err(e) => Ok((e.into_bytes().iter().map(|&b| b as char).collect(), "Latin-1")),
+    }
+}
+
+fn mtime(p: &std::path::Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(p).and_then(|m| m.modified()).ok()
+}
+
+// All (non-overlapping) matches of `query` in `text`, as
+// (char position, byte start, byte end). Skips huge documents to stay snappy.
+fn find_matches(text: &str, query: &str, match_case: bool) -> Vec<(usize, usize, usize)> {
+    let mut out = Vec::new();
+    if query.is_empty() || text.len() > 1_000_000 {
+        return out;
+    }
+    let norm = |c: char| if match_case { c } else { lower(c) };
+    let t: Vec<(usize, char)> = text.char_indices().map(|(b, c)| (b, norm(c))).collect();
+    let q: Vec<char> = query.chars().map(norm).collect();
+    let n = q.len();
+    if n == 0 || n > t.len() {
+        return out;
+    }
+    let mut i = 0;
+    while i + n <= t.len() {
+        if t[i..i + n].iter().map(|&(_, c)| c).eq(q.iter().copied()) {
+            let end = t.get(i + n).map_or(text.len(), |&(b, _)| b);
+            out.push((i, t[i].0, end));
+            i += n;
+        } else {
+            i += 1;
+        }
+    }
+    out
 }
 
 // egui normally drops keyboard focus when you click outside the focused widget.
@@ -65,24 +135,29 @@ struct Notepad {
     word_wrap: bool,
     show_status: bool,
     font_size: f32,
+    show_line_numbers: bool,
     // markdown preview
     show_md: bool,
     md_cache: egui_commonmark::CommonMarkCache,
     // scroll direction while drag-selecting past the edge of the view
     drag_scroll: egui::Vec2,
     last_title: String,
+    // encoding the file had on disk (we always save UTF-8)
+    encoding: &'static str,
+    // detecting edits made to the file by other programs
+    disk_mtime: Option<std::time::SystemTime>,
+    disk_changed: bool,
+    recent: Vec<PathBuf>,
 }
+
+const MAX_RECENT: usize = 8;
 
 impl Notepad {
     fn new(path: Option<PathBuf>) -> Self {
-        let text = path
-            .as_ref()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .unwrap_or_default();
-        Notepad {
-            path,
-            saved: text.clone(),
-            text,
+        let mut pad = Notepad {
+            path: None,
+            saved: String::new(),
+            text: String::new(),
             status_msg: String::new(),
             allow_close: false,
             show_find: false,
@@ -96,11 +171,40 @@ impl Notepad {
             word_wrap: true,
             show_status: true,
             font_size: 14.0,
+            show_line_numbers: true,
             show_md: std::env::var_os("RUSTPAD_MD").is_some(),
             md_cache: Default::default(),
             drag_scroll: egui::Vec2::ZERO,
             last_title: String::new(),
+            encoding: "UTF-8",
+            disk_mtime: None,
+            disk_changed: false,
+            recent: Vec::new(),
+        };
+        pad.load_from_disk(path);
+        pad
+    }
+
+    // restore persisted settings (called once at startup)
+    fn restore(mut self, storage: Option<&dyn eframe::Storage>) -> Self {
+        if let Some(s) = storage {
+            if let Some(v) = s.get_string("font_size").and_then(|v| v.parse().ok()) {
+                self.font_size = f32::clamp(v, 8.0, 40.0);
+            }
+            let get_bool = |key: &str| s.get_string(key).and_then(|v| v.parse::<bool>().ok());
+            self.word_wrap = get_bool("word_wrap").unwrap_or(self.word_wrap);
+            self.show_status = get_bool("show_status").unwrap_or(self.show_status);
+            self.show_line_numbers = get_bool("line_numbers").unwrap_or(self.show_line_numbers);
+            if let Some(v) = s.get_string("recent") {
+                self.recent = v
+                    .lines()
+                    .filter(|l| !l.is_empty())
+                    .map(PathBuf::from)
+                    .take(MAX_RECENT)
+                    .collect();
+            }
         }
+        self
     }
 
     fn is_dirty(&self) -> bool {
@@ -118,15 +222,26 @@ impl Notepad {
     // ---------- file ----------
 
     fn write_file(&mut self) {
-        if let Some(p) = &self.path {
-            match std::fs::write(p, &self.text) {
+        if let Some(p) = self.path.clone() {
+            match std::fs::write(&p, &self.text) {
                 Ok(_) => {
                     self.saved = self.text.clone();
                     self.status_msg = "Saved!".into();
+                    self.encoding = "UTF-8";
+                    self.disk_mtime = mtime(&p);
+                    self.disk_changed = false;
+                    self.remember_recent(p);
                 }
                 Err(e) => self.status_msg = format!("Save failed: {e}"),
             }
         }
+    }
+
+    fn remember_recent(&mut self, p: PathBuf) {
+        let p = p.canonicalize().unwrap_or(p);
+        self.recent.retain(|r| r != &p);
+        self.recent.insert(0, p);
+        self.recent.truncate(MAX_RECENT);
     }
 
     fn save(&mut self) {
@@ -149,16 +264,38 @@ impl Notepad {
         }
     }
 
-    fn load(&mut self, ctx: &egui::Context, path: Option<PathBuf>) {
-        let text = path
-            .as_ref()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .unwrap_or_default();
+    // Load a file into the editor. Returns false if reading failed; the
+    // current document is then left untouched so nothing can be overwritten.
+    fn load_from_disk(&mut self, path: Option<PathBuf>) -> bool {
+        let (text, encoding) = match &path {
+            Some(p) => match read_text(p) {
+                Ok(t) => t,
+                // a path that doesn't exist yet is a new file (e.g. `rustpad-gui new.txt`)
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (String::new(), "UTF-8"),
+                Err(e) => {
+                    self.status_msg = format!("Could not open {}: {e}", p.display());
+                    return false;
+                }
+            },
+            None => (String::new(), "UTF-8"),
+        };
+        self.disk_mtime = path.as_deref().and_then(mtime);
+        if let Some(p) = path.clone() {
+            self.remember_recent(p);
+        }
         self.path = path;
         self.saved = text.clone();
         self.text = text;
+        self.encoding = encoding;
+        self.disk_changed = false;
         self.status_msg.clear();
-        self.select(ctx, 0, 0);
+        true
+    }
+
+    fn load(&mut self, ctx: &egui::Context, path: Option<PathBuf>) {
+        if self.load_from_disk(path) {
+            self.select(ctx, 0, 0);
+        }
     }
 
     fn open(&mut self, ctx: &egui::Context) {
@@ -274,6 +411,12 @@ impl Notepad {
     }
 
     // ---------- find and replace ----------
+
+    // all (non-overlapping) matches of the current query, as
+    // (char position, byte start, byte end)
+    fn matches(&self) -> Vec<(usize, usize, usize)> {
+        find_matches(&self.text, &self.query, self.match_case)
+    }
 
     fn find(&mut self, ctx: &egui::Context, backwards: bool) {
         if self.query.is_empty() {
@@ -441,13 +584,37 @@ impl Notepad {
 
     fn editor_panel(&mut self, ui: &mut egui::Ui) {
         let (wrap, font_size) = (self.word_wrap, self.font_size);
+        // highlight every match while the find bar is open
+        let highlight = (self.show_find && !self.query.is_empty())
+            .then(|| (self.query.clone(), self.match_case));
         let mut layouter = move |ui: &egui::Ui, buf: &dyn egui::TextBuffer, width: f32| {
-            let job = egui::text::LayoutJob::simple(
-                buf.as_str().to_owned(),
-                egui::FontId::monospace(font_size),
-                ui.visuals().text_color(),
-                if wrap { width } else { f32::INFINITY },
-            );
+            let font = egui::FontId::monospace(font_size);
+            let color = ui.visuals().text_color();
+            let wrap_width = if wrap { width } else { f32::INFINITY };
+            let text = buf.as_str();
+            let ranges = highlight
+                .as_ref()
+                .map(|(q, case)| find_matches(text, q, *case))
+                .unwrap_or_default();
+            let job = if ranges.is_empty() {
+                egui::text::LayoutJob::simple(text.to_owned(), font, color, wrap_width)
+            } else {
+                let mut job = egui::text::LayoutJob::default();
+                job.wrap.max_width = wrap_width;
+                let normal = egui::TextFormat::simple(font.clone(), color);
+                let marked = egui::TextFormat {
+                    background: ui.visuals().selection.bg_fill.gamma_multiply(0.4),
+                    ..normal.clone()
+                };
+                let mut prev = 0;
+                for &(_, start, end) in &ranges {
+                    job.append(&text[prev..start], 0.0, normal.clone());
+                    job.append(&text[start..end], 0.0, marked.clone());
+                    prev = end;
+                }
+                job.append(&text[prev..], 0.0, normal);
+                job
+            };
             ui.ctx().fonts_mut(|f| f.layout_job(job))
         };
         egui::CentralPanel::default().show(ui, |ui| {
@@ -460,42 +627,93 @@ impl Notepad {
                 egui::ScrollArea::both()
             };
             scroll.auto_shrink(false).show(ui, |ui| {
-                let edit = egui::TextEdit::multiline(&mut self.text)
-                    .id(editor_id())
-                    .font(egui::FontId::monospace(font_size))
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(rows)
-                    .layouter(&mut layouter);
-                let response = ui.add(edit);
+                // the line number gutter reserves space left of the text
+                let gutter_w = if self.show_line_numbers {
+                    let digits = self.text.lines().count().max(1).to_string().len().max(2);
+                    let char_w = ui
+                        .ctx()
+                        .fonts_mut(|f| f.glyph_width(&egui::FontId::monospace(font_size), '0'));
+                    digits as f32 * char_w + 16.0
+                } else {
+                    0.0
+                };
+                ui.horizontal_top(|ui| {
+                    let gutter_right = ui.cursor().left() + gutter_w;
+                    if gutter_w > 0.0 {
+                        ui.add_space(gutter_w);
+                    }
+                    let edit = egui::TextEdit::multiline(&mut self.text)
+                        .id(editor_id())
+                        .font(egui::FontId::monospace(font_size))
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(rows)
+                        .layouter(&mut layouter);
+                    let out = edit.show(ui);
+                    let response = out.response.response;
+                    if gutter_w > 0.0 {
+                        // number the rows where a new logical line starts
+                        // (wrapped continuation rows get no number)
+                        let painter = ui.painter();
+                        let weak = ui.visuals().weak_text_color();
+                        let font = egui::FontId::monospace(font_size);
+                        let clip = ui.clip_rect();
+                        let mut line_no = 1usize;
+                        let mut line_start = true;
+                        for placed in &out.galley.rows {
+                            let y = out.galley_pos.y + placed.pos.y;
+                            if y > clip.bottom() {
+                                break;
+                            }
+                            if line_start && y + row_h >= clip.top() {
+                                painter.text(
+                                    egui::pos2(gutter_right - 8.0, y),
+                                    egui::Align2::RIGHT_TOP,
+                                    line_no.to_string(),
+                                    font.clone(),
+                                    weak,
+                                );
+                            }
+                            line_start = placed.ends_with_newline;
+                            if placed.ends_with_newline {
+                                line_no += 1;
+                            }
+                        }
+                    }
+                    self.editor_response(ui, wrap, &response);
+                });
+            });
+        });
+    }
+
+    // shared handling of the editor response (status + drag auto-scroll)
+    fn editor_response(&mut self, ui: &egui::Ui, wrap: bool, response: &egui::Response) {
                 if response.changed() {
                     self.status_msg.clear();
                 }
-                // egui never scrolls while drag-selecting past the edge of the
-                // view (it only follows the cursor on keyboard input), so keep
-                // scrolling ourselves as long as the pointer is outside.
-                if response.dragged() {
-                    if let Some(pos) = ui.ctx().pointer_latest_pos() {
-                        let visible = ui.clip_rect();
-                        let past_edge = |lo: f32, hi: f32, p: f32| {
-                            (lo - p).max(0.0) + (hi - p).min(0.0) // >0 above/left, <0 below/right
-                        };
-                        self.drag_scroll = egui::Vec2::new(
-                            if wrap { 0.0 } else { past_edge(visible.left(), visible.right(), pos.x) },
-                            past_edge(visible.top(), visible.bottom(), pos.y),
-                        );
-                    }
-                    // when the pointer leaves the window mid-drag some platforms
-                    // stop sending positions; keep the last direction going
-                    if self.drag_scroll != egui::Vec2::ZERO {
-                        let delta = self.drag_scroll * 0.3; // overshoot distance controls the speed
-                        ui.scroll_with_delta_animation(delta, egui::style::ScrollAnimation::none());
-                        ui.ctx().request_repaint(); // keep scrolling while the pointer rests
-                    }
-                } else {
-                    self.drag_scroll = egui::Vec2::ZERO;
-                }
-            });
-        });
+        // egui never scrolls while drag-selecting past the edge of the
+        // view (it only follows the cursor on keyboard input), so keep
+        // scrolling ourselves as long as the pointer is outside.
+        if response.dragged() {
+            if let Some(pos) = ui.ctx().pointer_latest_pos() {
+                let visible = ui.clip_rect();
+                let past_edge = |lo: f32, hi: f32, p: f32| {
+                    (lo - p).max(0.0) + (hi - p).min(0.0) // >0 above/left, <0 below/right
+                };
+                self.drag_scroll = egui::Vec2::new(
+                    if wrap { 0.0 } else { past_edge(visible.left(), visible.right(), pos.x) },
+                    past_edge(visible.top(), visible.bottom(), pos.y),
+                );
+            }
+            // when the pointer leaves the window mid-drag some platforms
+            // stop sending positions; keep the last direction going
+            if self.drag_scroll != egui::Vec2::ZERO {
+                let delta = self.drag_scroll * 0.3; // overshoot distance controls the speed
+                ui.scroll_with_delta_animation(delta, egui::style::ScrollAnimation::none());
+                ui.ctx().request_repaint(); // keep scrolling while the pointer rests
+            }
+        } else {
+            self.drag_scroll = egui::Vec2::ZERO;
+        }
     }
 }
 
@@ -503,12 +721,45 @@ impl eframe::App for Notepad {
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
         self.app_ui(ui);
     }
+
+    // called periodically and on exit; settings survive restarts
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        storage.set_string("font_size", self.font_size.to_string());
+        storage.set_string("word_wrap", self.word_wrap.to_string());
+        storage.set_string("show_status", self.show_status.to_string());
+        storage.set_string("line_numbers", self.show_line_numbers.to_string());
+        let recent: Vec<String> = self.recent.iter().map(|p| p.display().to_string()).collect();
+        storage.set_string("recent", recent.join("\n"));
+    }
 }
 
 impl Notepad {
     fn app_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         self.handle_shortcuts(&ctx);
+
+        // Ctrl+scroll zooms, like in a browser
+        let zoom = ctx.input(|i| i.zoom_delta());
+        if zoom != 1.0 {
+            ctx.set_zoom_factor((ctx.zoom_factor() * zoom).clamp(0.5, 4.0));
+        }
+
+        // open files dropped onto the window
+        let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+        if let Some(path) = dropped.into_iter().find_map(|f| f.path) {
+            if self.confirm_unsaved() {
+                self.load(&ctx, Some(path));
+            }
+        }
+
+        // notice edits made by other programs when the window regains focus
+        if ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::WindowFocused(true)))) {
+            if let Some(p) = &self.path {
+                if mtime(p) != self.disk_mtime {
+                    self.disk_changed = true;
+                }
+            }
+        }
 
         // ask about saving when the window closes with unsaved changes
         if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close {
@@ -543,6 +794,26 @@ impl Notepad {
                     if ui.add(btn("Open…", "Ctrl+O")).clicked() {
                         self.open(&ctx);
                     }
+                    ui.menu_button("Open Recent", |ui| {
+                        if self.recent.is_empty() {
+                            ui.weak("(empty)");
+                            return;
+                        }
+                        for p in self.recent.clone() {
+                            let name = p
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| p.display().to_string());
+                            let entry = ui.button(name).on_hover_text(p.display().to_string());
+                            if entry.clicked() && self.confirm_unsaved() {
+                                self.load(&ctx, Some(p));
+                            }
+                        }
+                        ui.separator();
+                        if ui.button("Clear List").clicked() {
+                            self.recent.clear();
+                        }
+                    });
                     ui.separator();
                     if ui.add(btn("Save", "Ctrl+S")).clicked() {
                         self.save();
@@ -633,15 +904,50 @@ impl Notepad {
                     }
                     ui.separator();
                     ui.checkbox(&mut self.show_status, "Status Bar");
+                    ui.checkbox(&mut self.show_line_numbers, "Line Numbers");
                     if ui
                         .add(egui::Button::selectable(self.show_md, "Markdown Preview").shortcut_text("Ctrl+M"))
                         .clicked()
                     {
                         self.show_md = !self.show_md;
                     }
+                    ui.separator();
+                    ui.menu_button("Theme", |ui| {
+                        let mut pref = ctx.options(|o| o.theme_preference);
+                        let before = pref;
+                        ui.radio_value(&mut pref, egui::ThemePreference::System, "System");
+                        ui.radio_value(&mut pref, egui::ThemePreference::Light, "Light");
+                        ui.radio_value(&mut pref, egui::ThemePreference::Dark, "Dark");
+                        if pref != before {
+                            ctx.set_theme(pref);
+                        }
+                    });
                 });
             });
         });
+
+        // ---------- the file changed on disk ----------
+        if self.disk_changed {
+            egui::Panel::top("disk_changed").show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        format!("\"{}\" has changed on disk.", self.file_name()),
+                    );
+                    if self.is_dirty() {
+                        ui.label("Reloading discards your unsaved edits!");
+                    }
+                    if ui.button("Reload").clicked() {
+                        let p = self.path.clone();
+                        self.load(&ctx, p);
+                    }
+                    if ui.button("Ignore").clicked() {
+                        self.disk_changed = false;
+                        self.disk_mtime = self.path.as_deref().and_then(mtime);
+                    }
+                });
+            });
+        }
 
         // ---------- find bar ----------
         if self.show_find {
@@ -664,6 +970,17 @@ impl Notepad {
                         self.find(&ctx, true);
                     }
                     ui.checkbox(&mut self.match_case, "Match case");
+                    if !self.query.is_empty() {
+                        let matches = self.matches();
+                        let (a, b) = self.selection(&ctx);
+                        let current = matches
+                            .iter()
+                            .position(|&(pos, ..)| pos == a && pos + self.query.chars().count() == b);
+                        ui.weak(match current {
+                            Some(i) => format!("{} of {}", i + 1, matches.len()),
+                            None => format!("{} found", matches.len()),
+                        });
+                    }
                     if ui.button("✕").clicked() {
                         self.show_find = false;
                         self.show_replace = false;
@@ -743,7 +1060,8 @@ impl Notepad {
                     ui.separator();
                     ui.label(if self.text.contains('\r') { "CRLF" } else { "LF" });
                     ui.separator();
-                    ui.label("UTF-8");
+                    ui.label(self.encoding)
+                        .on_hover_text("Files are always saved as UTF-8");
                     ui.separator();
                     ui.label(if self.is_dirty() { "Modified" } else { "Saved" });
                     if !self.status_msg.is_empty() {
@@ -857,6 +1175,39 @@ mod tests {
         assert_eq!(p.text, "good evening");
         assert_eq!(p.selection(&ctx), (12, 12));
     }
+
+    #[test]
+    fn latin1_files_open_with_fallback_instead_of_empty() {
+        let f = std::env::temp_dir().join("rustpad_test_latin1.txt");
+        // "blåbær" as ISO-8859-1 bytes — invalid UTF-8
+        std::fs::write(&f, [b'b', b'l', 0xE5, b'b', 0xE6, b'r']).unwrap();
+        let p = Notepad::new(Some(f.clone()));
+        std::fs::remove_file(&f).ok();
+        assert_eq!(p.text, "blåbær");
+        assert_eq!(p.encoding, "Latin-1");
+        assert!(!p.is_dirty());
+    }
+
+    #[test]
+    fn missing_file_is_a_new_empty_document() {
+        let f = std::env::temp_dir().join("rustpad_does_not_exist/new.txt");
+        let p = Notepad::new(Some(f.clone()));
+        assert_eq!(p.text, "");
+        assert_eq!(p.path, Some(f));
+        assert!(p.status_msg.is_empty());
+    }
+
+    #[test]
+    fn find_matches_reports_char_and_byte_positions() {
+        let text = "Blåbær og blåbær";
+        let m = find_matches(text, "BLÅBÆR", false);
+        assert_eq!(m.len(), 2);
+        assert_eq!(m[0].0, 0);
+        assert_eq!(&text[m[0].1..m[0].2], "Blåbær");
+        assert_eq!(m[1].0, 10); // char position, not byte position
+        assert_eq!(&text[m[1].1..m[1].2], "blåbær");
+        assert!(find_matches(text, "BLÅBÆR", true).is_empty());
+    }
 }
 
 // UI tests: drive the real app (menus and all) with simulated mouse input via
@@ -929,11 +1280,11 @@ mod ui_tests {
         h.set_size(egui::Vec2::new(400.0, 200.0));
         h.run();
 
-        h.hover_at(Pos2::new(50.0, 50.0));
+        h.hover_at(Pos2::new(100.0, 50.0));
         h.step();
-        h.drag_at(Pos2::new(50.0, 50.0)); // press and hold
+        h.drag_at(Pos2::new(100.0, 50.0)); // press and hold
         h.step();
-        h.hover_at(Pos2::new(50.0, 250.0)); // drag below the window edge
+        h.hover_at(Pos2::new(100.0, 250.0)); // drag below the window edge
         h.run_steps(10);
         let ctx = h.ctx.clone();
         let (_, halfway) = h.state().selection(&ctx);
