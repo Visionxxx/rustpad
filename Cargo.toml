@@ -24,3 +24,6 @@ opt-level = "z"
 lto = true
 strip = true
 panic = "abort"
+
+[dev-dependencies]
+egui_kittest = { version = "0.35", default-features = false }

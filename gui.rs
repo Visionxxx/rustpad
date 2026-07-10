@@ -25,7 +25,24 @@ fn main() -> eframe::Result {
             .with_min_inner_size([300.0, 200.0]),
         ..Default::default()
     };
-    eframe::run_native("Rustpad", opts, Box::new(|_| Ok(Box::new(Notepad::new(file)))))
+    eframe::run_native(
+        "Rustpad",
+        opts,
+        Box::new(|cc| {
+            configure_focus(&cc.egui_ctx);
+            Ok(Box::new(Notepad::new(file)))
+        }),
+    )
+}
+
+// egui normally drops keyboard focus when you click outside the focused widget.
+// That made menu actions like Edit → Select All appear to do nothing: the click
+// on the menu item stole focus from the editor, and without focus the selection
+// is never painted. Keep focus until another widget explicitly takes it.
+fn configure_focus(ctx: &egui::Context) {
+    ctx.options_mut(|o| {
+        o.input_options.surrender_focus_on = egui::SurrenderFocusOn::Never;
+    });
 }
 
 struct Notepad {
@@ -51,6 +68,9 @@ struct Notepad {
     // markdown preview
     show_md: bool,
     md_cache: egui_commonmark::CommonMarkCache,
+    // scroll direction while drag-selecting past the edge of the view
+    drag_scroll: egui::Vec2,
+    last_title: String,
 }
 
 impl Notepad {
@@ -78,6 +98,8 @@ impl Notepad {
             font_size: 14.0,
             show_md: std::env::var_os("RUSTPAD_MD").is_some(),
             md_cache: Default::default(),
+            drag_scroll: egui::Vec2::ZERO,
+            last_title: String::new(),
         }
     }
 
@@ -414,10 +436,77 @@ impl Notepad {
             self.show_replace = false;
         }
     }
+
+    // ---------- the text editor itself ----------
+
+    fn editor_panel(&mut self, ui: &mut egui::Ui) {
+        let (wrap, font_size) = (self.word_wrap, self.font_size);
+        let mut layouter = move |ui: &egui::Ui, buf: &dyn egui::TextBuffer, width: f32| {
+            let job = egui::text::LayoutJob::simple(
+                buf.as_str().to_owned(),
+                egui::FontId::monospace(font_size),
+                ui.visuals().text_color(),
+                if wrap { width } else { f32::INFINITY },
+            );
+            ui.ctx().fonts_mut(|f| f.layout_job(job))
+        };
+        egui::CentralPanel::default().show(ui, |ui| {
+            // TextEdit sizes itself from a row count, so compute how many rows fill the panel
+            let row_h = ui.ctx().fonts_mut(|f| f.row_height(&egui::FontId::monospace(font_size)));
+            let rows = (ui.available_height() / row_h).ceil().max(1.0) as usize;
+            let scroll = if wrap {
+                egui::ScrollArea::vertical()
+            } else {
+                egui::ScrollArea::both()
+            };
+            scroll.auto_shrink(false).show(ui, |ui| {
+                let edit = egui::TextEdit::multiline(&mut self.text)
+                    .id(editor_id())
+                    .font(egui::FontId::monospace(font_size))
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(rows)
+                    .layouter(&mut layouter);
+                let response = ui.add(edit);
+                if response.changed() {
+                    self.status_msg.clear();
+                }
+                // egui never scrolls while drag-selecting past the edge of the
+                // view (it only follows the cursor on keyboard input), so keep
+                // scrolling ourselves as long as the pointer is outside.
+                if response.dragged() {
+                    if let Some(pos) = ui.ctx().pointer_latest_pos() {
+                        let visible = ui.clip_rect();
+                        let past_edge = |lo: f32, hi: f32, p: f32| {
+                            (lo - p).max(0.0) + (hi - p).min(0.0) // >0 above/left, <0 below/right
+                        };
+                        self.drag_scroll = egui::Vec2::new(
+                            if wrap { 0.0 } else { past_edge(visible.left(), visible.right(), pos.x) },
+                            past_edge(visible.top(), visible.bottom(), pos.y),
+                        );
+                    }
+                    // when the pointer leaves the window mid-drag some platforms
+                    // stop sending positions; keep the last direction going
+                    if self.drag_scroll != egui::Vec2::ZERO {
+                        let delta = self.drag_scroll * 0.3; // overshoot distance controls the speed
+                        ui.scroll_with_delta_animation(delta, egui::style::ScrollAnimation::none());
+                        ui.ctx().request_repaint(); // keep scrolling while the pointer rests
+                    }
+                } else {
+                    self.drag_scroll = egui::Vec2::ZERO;
+                }
+            });
+        });
+    }
 }
 
 impl eframe::App for Notepad {
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
+        self.app_ui(ui);
+    }
+}
+
+impl Notepad {
+    fn app_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         self.handle_shortcuts(&ctx);
 
@@ -432,10 +521,13 @@ impl eframe::App for Notepad {
 
         // window title like Notepad: "file.txt* – Rustpad"
         let star = if self.is_dirty() { "*" } else { "" };
-        ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
-            "{}{star} – Rustpad",
-            self.file_name()
-        )));
+        let title = format!("{}{star} – Rustpad", self.file_name());
+        if title != self.last_title {
+            // only on change: sending a viewport command forces a repaint,
+            // and doing it every frame would keep the app repainting forever
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.last_title = title;
+        }
 
         // ---------- menu bar ----------
         egui::Panel::top("menu").show(ui, |ui| {
@@ -676,38 +768,7 @@ impl eframe::App for Notepad {
             return;
         }
 
-        // ---------- the text editor itself ----------
-        let (wrap, font_size) = (self.word_wrap, self.font_size);
-        let mut layouter = move |ui: &egui::Ui, buf: &dyn egui::TextBuffer, width: f32| {
-            let job = egui::text::LayoutJob::simple(
-                buf.as_str().to_owned(),
-                egui::FontId::monospace(font_size),
-                ui.visuals().text_color(),
-                if wrap { width } else { f32::INFINITY },
-            );
-            ui.ctx().fonts_mut(|f| f.layout_job(job))
-        };
-        egui::CentralPanel::default().show(ui, |ui| {
-            // TextEdit sizes itself from a row count, so compute how many rows fill the panel
-            let row_h = ui.ctx().fonts_mut(|f| f.row_height(&egui::FontId::monospace(font_size)));
-            let rows = (ui.available_height() / row_h).ceil().max(1.0) as usize;
-            let scroll = if wrap {
-                egui::ScrollArea::vertical()
-            } else {
-                egui::ScrollArea::both()
-            };
-            scroll.auto_shrink(false).show(ui, |ui| {
-                let edit = egui::TextEdit::multiline(&mut self.text)
-                    .id(editor_id())
-                    .font(egui::FontId::monospace(font_size))
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(rows)
-                    .layouter(&mut layouter);
-                if ui.add(edit).changed() {
-                    self.status_msg.clear();
-                }
-            });
-        });
+        self.editor_panel(ui);
     }
 }
 
@@ -795,5 +856,93 @@ mod tests {
         p.insert(&ctx, "evening");
         assert_eq!(p.text, "good evening");
         assert_eq!(p.selection(&ctx), (12, 12));
+    }
+}
+
+// UI tests: drive the real app (menus and all) with simulated mouse input via
+// egui_kittest, so regressions in focus/selection/scrolling show up.
+#[cfg(test)]
+mod ui_tests {
+    use super::*;
+    use egui::Pos2;
+    use egui_kittest::kittest::Queryable;
+    use egui_kittest::Harness;
+
+    fn harness(text: &str) -> Harness<'static, Notepad> {
+        let mut p = Notepad::new(None);
+        p.text = text.into();
+        let harness = Harness::new_ui_state(|ui, p: &mut Notepad| p.app_ui(ui), p);
+        configure_focus(&harness.ctx);
+        harness
+    }
+
+    // a realistic click: hover, press and release on separate frames
+    fn click_at(h: &mut Harness<'_, Notepad>, pos: Pos2) {
+        h.hover_at(pos);
+        h.step();
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            });
+            h.step();
+        }
+        h.run_steps(2);
+    }
+
+    fn click_label(h: &mut Harness<'_, Notepad>, label: &str) {
+        let pos = h.get_by_label(label).rect().center();
+        click_at(h, pos);
+    }
+
+    // Without SurrenderFocusOn::Never, the click on the menu item steals focus
+    // from the editor and the Select All highlight is never painted.
+    #[test]
+    fn select_all_from_the_edit_menu() {
+        let mut h = harness("hello\nworld\nfoo");
+        h.run();
+
+        // click into the editor, like a user placing the cursor
+        click_at(&mut h, Pos2::new(400.0, 300.0));
+        assert_eq!(h.ctx.memory(|m| m.focused()), Some(editor_id()), "clicking the text should focus it");
+
+        // menu item labels include the shortcut text
+        click_label(&mut h, "Edit");
+        click_label(&mut h, "Select All Ctrl+A");
+
+        let ctx = h.ctx.clone();
+        assert_eq!(h.state().selection(&ctx), (0, 15), "everything should be selected");
+        assert_eq!(
+            ctx.memory(|m| m.focused()),
+            Some(editor_id()),
+            "the editor must keep focus or the selection is not painted"
+        );
+    }
+
+    // Dragging a selection past the bottom edge must scroll the view along.
+    #[test]
+    fn drag_select_scrolls_past_the_edge() {
+        let text: String = (1..=500).map(|i| format!("line number {i}\n")).collect();
+        let mut h = harness(&text);
+        h.set_size(egui::Vec2::new(400.0, 200.0));
+        h.run();
+
+        h.hover_at(Pos2::new(50.0, 50.0));
+        h.step();
+        h.drag_at(Pos2::new(50.0, 50.0)); // press and hold
+        h.step();
+        h.hover_at(Pos2::new(50.0, 250.0)); // drag below the window edge
+        h.run_steps(10);
+        let ctx = h.ctx.clone();
+        let (_, halfway) = h.state().selection(&ctx);
+        h.run_steps(10);
+        let (_, sel_end) = h.state().selection(&ctx);
+
+        // without auto-scroll the selection stalls at the last visible row;
+        // with it, the view follows and the selection keeps growing
+        assert!(sel_end > 300, "view should scroll while dragging, got {sel_end}");
+        assert!(sel_end > halfway, "selection should keep growing while the pointer rests");
     }
 }
