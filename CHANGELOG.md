@@ -5,11 +5,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Find Next did not scroll to matches outside the visible area.** egui
+  only follows the cursor on keyboard edits, so selections set by
+  find/go-to-line/replace now explicitly scroll the view to the match
+  (including back up when the search wraps around). Opening a file also
+  resets the view to the top instead of keeping the old scroll position.
+
 ### Added
 
-- Stress test: a 1000-line Markdown fixture (`testdata/stress.md`) driven
-  through the real app — editing view, scrolling, search highlighting,
-  select-all and Markdown preview — with per-frame timing assertions.
+- Stress tests: 1000-line and 10,000-line Markdown fixtures
+  (`testdata/stress.md`, `testdata/stress10k.md`) driven through the real
+  app — editing view, scrolling, search highlighting, select-all and
+  Markdown preview — with per-frame timing assertions.
 
 ## [0.2.0] – 2026-07-10
 

@@ -148,6 +148,10 @@ struct Notepad {
     disk_mtime: Option<std::time::SystemTime>,
     disk_changed: bool,
     recent: Vec<PathBuf>,
+    // scroll the view to the cursor on the next frame (set after find/goto)
+    scroll_to_cursor: bool,
+    // current editor scroll position (observed; used by tests)
+    scroll_offset: egui::Vec2,
 }
 
 const MAX_RECENT: usize = 8;
@@ -180,6 +184,8 @@ impl Notepad {
             disk_mtime: None,
             disk_changed: false,
             recent: Vec::new(),
+            scroll_to_cursor: false,
+            scroll_offset: egui::Vec2::ZERO,
         };
         pad.load_from_disk(path);
         pad
@@ -294,7 +300,7 @@ impl Notepad {
 
     fn load(&mut self, ctx: &egui::Context, path: Option<PathBuf>) {
         if self.load_from_disk(path) {
-            self.select(ctx, 0, 0);
+            self.select_show(ctx, 0, 0);
         }
     }
 
@@ -383,6 +389,14 @@ impl Notepad {
         ctx.memory_mut(|m| m.request_focus(editor_id()));
     }
 
+    // Select AND bring the cursor into view. egui only auto-scrolls to the
+    // cursor on keyboard edits, so a selection set programmatically (find,
+    // go-to-line) needs an explicit scroll on the next editor frame.
+    fn select_show(&mut self, ctx: &egui::Context, a: usize, b: usize) {
+        self.select(ctx, a, b);
+        self.scroll_to_cursor = true;
+    }
+
     // send an event to the text field (undo, cut, paste …)
     fn send_event(&self, ctx: &egui::Context, e: egui::Event) {
         ctx.memory_mut(|m| m.request_focus(editor_id()));
@@ -407,7 +421,7 @@ impl Notepad {
         let (ba, bb) = (byte_idx(&self.text, a), byte_idx(&self.text, b));
         self.text.replace_range(ba..bb, s);
         let c = a + s.chars().count();
-        self.select(ctx, c, c);
+        self.select_show(ctx, c, c);
     }
 
     // ---------- find and replace ----------
@@ -447,7 +461,7 @@ impl Notepad {
         };
         match found {
             Some(i) => {
-                self.select(ctx, i, i + n);
+                self.select_show(ctx, i, i + n);
                 self.status_msg.clear();
             }
             None => self.status_msg = not_found,
@@ -467,7 +481,7 @@ impl Notepad {
                 let (ba, bb) = (byte_idx(&self.text, a), byte_idx(&self.text, b));
                 self.text.replace_range(ba..bb, &self.replacement);
                 let c = a + self.replacement.chars().count();
-                self.select(ctx, c, c);
+                self.select_show(ctx, c, c);
             }
         }
         self.find(ctx, false);
@@ -517,7 +531,7 @@ impl Notepad {
             if line < target {
                 self.status_msg = format!("The document only has {line} lines");
             }
-            self.select(ctx, idx, idx);
+            self.select_show(ctx, idx, idx);
         }
         self.show_goto = false;
     }
@@ -626,7 +640,7 @@ impl Notepad {
             } else {
                 egui::ScrollArea::both()
             };
-            scroll.auto_shrink(false).show(ui, |ui| {
+            let scroll_out = scroll.auto_shrink(false).show(ui, |ui| {
                 // the line number gutter reserves space left of the text
                 let gutter_w = if self.show_line_numbers {
                     let digits = self.text.lines().count().max(1).to_string().len().max(2);
@@ -650,6 +664,18 @@ impl Notepad {
                         .layouter(&mut layouter);
                     let out = edit.show(ui);
                     let response = out.response.response;
+                    // bring a selection made by find/go-to-line into view
+                    if self.scroll_to_cursor {
+                        self.scroll_to_cursor = false;
+                        if let Some(range) = out.state.cursor.char_range() {
+                            let rect = out
+                                .galley
+                                .pos_from_cursor(range.primary)
+                                .translate(out.galley_pos.to_vec2() - egui::vec2(out.galley.rect.left(), 0.0));
+                            // a little margin so the match isn't glued to the edge
+                            ui.scroll_to_rect(rect.expand2(egui::vec2(8.0, 2.0 * row_h)), None);
+                        }
+                    }
                     if gutter_w > 0.0 {
                         // number the rows where a new logical line starts
                         // (wrapped continuation rows get no number)
@@ -682,6 +708,7 @@ impl Notepad {
                     self.editor_response(ui, wrap, &response);
                 });
             });
+            self.scroll_offset = scroll_out.state.offset;
         });
     }
 
@@ -1272,14 +1299,55 @@ mod ui_tests {
         );
     }
 
-    // Stress test: run the real app over a 1000-line Markdown document and
+    // Find Next must scroll the view to matches beyond the visible area
+    // (egui only follows the cursor on keyboard edits, so the app does it).
+    #[test]
+    fn find_next_scrolls_to_offscreen_matches() {
+        let text: String = (1..=300)
+            .map(|i| if i % 100 == 0 { format!("needle {i}\n") } else { format!("line {i}\n") })
+            .collect();
+        let mut h = harness(&text);
+        h.set_size(egui::Vec2::new(500.0, 300.0));
+        h.run();
+
+        h.state_mut().show_find = true;
+        h.state_mut().query = "needle".into();
+        h.run();
+
+        // first match is on line 100, far below the ~15 visible rows
+        click_label(&mut h, "Next");
+        let first = h.state().scroll_offset.y;
+        assert!(first > 0.0, "view should scroll down to the match, offset={first}");
+
+        // next match on line 200: further down
+        click_label(&mut h, "Next");
+        let second = h.state().scroll_offset.y;
+        assert!(second > first, "view should follow to the next match ({first} -> {second})");
+
+        // after line 300 the search wraps to line 100: the view must jump back up
+        click_label(&mut h, "Next");
+        click_label(&mut h, "Next");
+        let wrapped = h.state().scroll_offset.y;
+        assert!(wrapped < second, "wrap-around should scroll back up ({second} -> {wrapped})");
+    }
+
+    // Stress test: run the real app over a large Markdown document and
     // time the expensive paths (layout with line numbers, search highlight,
     // select all, scrolling, markdown preview).
     #[test]
     fn stress_1000_line_markdown() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/stress.md");
+        stress_markdown("testdata/stress.md", 1000, 500.0);
+    }
+
+    #[test]
+    fn stress_10k_line_markdown() {
+        stress_markdown("testdata/stress10k.md", 10_000, 2000.0);
+    }
+
+    fn stress_markdown(path: &str, expected_lines: usize, budget_ms: f64) {
+        let path = format!("{}/{path}", env!("CARGO_MANIFEST_DIR"));
         let text = std::fs::read_to_string(path).unwrap();
-        assert_eq!(text.lines().count(), 1000, "the fixture should have 1000 lines");
+        assert_eq!(text.lines().count(), expected_lines);
 
         let mut h = harness(&text);
         h.set_size(egui::Vec2::new(900.0, 600.0));
@@ -1326,7 +1394,7 @@ mod ui_tests {
         let md_ms = time(&mut h, 10);
 
         println!(
-            "stress (ms/frame): editor {editor_ms:.1}, scroll {scroll_ms:.1}, \
+            "stress {expected_lines} lines (ms/frame): editor {editor_ms:.1}, scroll {scroll_ms:.1}, \
              find+highlight {find_ms:.1} ({matches} matches), select-all {select_ms:.1}, \
              markdown {md_ms:.1}"
         );
@@ -1338,7 +1406,7 @@ mod ui_tests {
             ("select-all", select_ms),
             ("markdown", md_ms),
         ] {
-            assert!(ms < 500.0, "{name} took {ms:.1} ms/frame — way too slow");
+            assert!(ms < budget_ms, "{name} took {ms:.1} ms/frame — way too slow");
         }
     }
 
