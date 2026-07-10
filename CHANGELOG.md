@@ -3,6 +3,14 @@
 All notable changes to Rustpad are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- Stress test: a 1000-line Markdown fixture (`testdata/stress.md`) driven
+  through the real app — editing view, scrolling, search highlighting,
+  select-all and Markdown preview — with per-frame timing assertions.
+
 ## [0.2.0] – 2026-07-10
 
 ### Fixed

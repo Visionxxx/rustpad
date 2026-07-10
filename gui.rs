@@ -1272,6 +1272,76 @@ mod ui_tests {
         );
     }
 
+    // Stress test: run the real app over a 1000-line Markdown document and
+    // time the expensive paths (layout with line numbers, search highlight,
+    // select all, scrolling, markdown preview).
+    #[test]
+    fn stress_1000_line_markdown() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/stress.md");
+        let text = std::fs::read_to_string(path).unwrap();
+        assert_eq!(text.lines().count(), 1000, "the fixture should have 1000 lines");
+
+        let mut h = harness(&text);
+        h.set_size(egui::Vec2::new(900.0, 600.0));
+        let time = |h: &mut Harness<'_, Notepad>, steps: usize| {
+            let t = std::time::Instant::now();
+            h.run_steps(steps);
+            t.elapsed().as_secs_f64() * 1000.0 / steps as f64
+        };
+
+        // plain editing view (layout + line number gutter)
+        let editor_ms = time(&mut h, 20);
+
+        // scroll through the whole document
+        h.hover_at(Pos2::new(450.0, 300.0));
+        let t = std::time::Instant::now();
+        for _ in 0..40 {
+            h.event(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line,
+                delta: egui::Vec2::new(0.0, -20.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: Default::default(),
+            });
+            h.step();
+        }
+        let scroll_ms = t.elapsed().as_secs_f64() * 1000.0 / 40.0;
+
+        // find bar open: every match gets highlighted while laying out
+        h.state_mut().show_find = true;
+        h.state_mut().query = "Rust".into();
+        let find_ms = time(&mut h, 20);
+        let matches = h.state().matches().len();
+        assert!(matches > 50, "expected plenty of matches, got {matches}");
+
+        // select the whole document
+        let ctx = h.ctx.clone();
+        let n = h.state().text.chars().count();
+        h.state_mut().select(&ctx, 0, n);
+        let select_ms = time(&mut h, 10);
+        assert_eq!(h.state().selection(&ctx), (0, n));
+
+        // markdown preview (egui_commonmark renders all 1000 lines)
+        h.state_mut().show_find = false;
+        h.state_mut().show_md = true;
+        let md_ms = time(&mut h, 10);
+
+        println!(
+            "stress (ms/frame): editor {editor_ms:.1}, scroll {scroll_ms:.1}, \
+             find+highlight {find_ms:.1} ({matches} matches), select-all {select_ms:.1}, \
+             markdown {md_ms:.1}"
+        );
+        // generous sanity bounds — catches runaway regressions, not jitter
+        for (name, ms) in [
+            ("editor", editor_ms),
+            ("scroll", scroll_ms),
+            ("find", find_ms),
+            ("select-all", select_ms),
+            ("markdown", md_ms),
+        ] {
+            assert!(ms < 500.0, "{name} took {ms:.1} ms/frame — way too slow");
+        }
+    }
+
     // Dragging a selection past the bottom edge must scroll the view along.
     #[test]
     fn drag_select_scrolls_past_the_edge() {
