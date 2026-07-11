@@ -1,7 +1,12 @@
 [package]
 name = "rustpad"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
+description = "A simple Notepad-style text editor with terminal and GUI editions"
+license = "MIT"
+repository = "https://github.com/Visionxxx/rustpad"
+readme = "README.md"
+authors = ["Glenn Roar Høye <glenn.roar.hoye@gmail.com>"]
 
 [[bin]]
 name = "rustpad"
@@ -27,3 +32,25 @@ panic = "abort"
 
 [dev-dependencies]
 egui_kittest = { version = "0.35", default-features = false }
+
+# Debian/Ubuntu package (built with `cargo deb`)
+[package.metadata.deb]
+maintainer = "Glenn Roar Høye <glenn.roar.hoye@gmail.com>"
+copyright = "2026 Glenn Roar Høye"
+extended-description = """A lightweight Notepad-style text editor written in Rust. \
+Includes a GUI edition (rustpad-gui) with find & replace, line numbers, \
+Markdown preview, themes and session persistence, plus a terminal edition (rustpad)."""
+section = "editors"
+priority = "optional"
+assets = [
+    ["target/release/rustpad", "usr/bin/", "755"],
+    ["target/release/rustpad-gui", "usr/bin/", "755"],
+    ["assets/rustpad.desktop", "usr/share/applications/", "644"],
+    ["assets/rustpad.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+    ["assets/rustpad-48.png", "usr/share/icons/hicolor/48x48/apps/rustpad.png", "644"],
+    ["assets/rustpad-64.png", "usr/share/icons/hicolor/64x64/apps/rustpad.png", "644"],
+    ["assets/rustpad-128.png", "usr/share/icons/hicolor/128x128/apps/rustpad.png", "644"],
+    ["assets/rustpad-256.png", "usr/share/icons/hicolor/256x256/apps/rustpad.png", "644"],
+    ["LICENSE", "usr/share/doc/rustpad/", "644"],
+    ["README.md", "usr/share/doc/rustpad/", "644"],
+]

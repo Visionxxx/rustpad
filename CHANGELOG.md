@@ -3,7 +3,7 @@
 All notable changes to Rustpad are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.2.1] – 2026-07-11
 
 ### Fixed
 
@@ -15,6 +15,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **MIT license** and package metadata.
+- **Linux packages**: a Debian/Ubuntu `.deb` (via `cargo-deb`) and a
+  portable AppImage, built automatically by a GitHub Actions workflow on
+  every version tag and attached to the GitHub release.
 - Stress tests: 1000-line and 10,000-line Markdown fixtures
   (`testdata/stress.md`, `testdata/stress10k.md`) driven through the real
   app — editing view, scrolling, search highlighting, select-all and

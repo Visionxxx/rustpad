@@ -1,0 +1,39 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  linux-packages:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run tests
+        run: cargo test --bin rustpad-gui
+
+      - name: Build release binaries
+        run: cargo build --release
+
+      - name: Build .deb package
+        run: |
+          cargo install cargo-deb --locked
+          cargo deb --no-build
+
+      - name: Build AppImage
+        run: bash packaging/appimage.sh
+
+      - name: Upload packages to the GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            target/debian/*.deb
+            Rustpad-*-x86_64.AppImage

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Rustpad
+Comment=A simple notepad written in Rust
+Exec=rustpad-gui %f
+Icon=rustpad
+Terminal=false
+Categories=Utility;TextEditor;
+MimeType=text/plain;text/markdown;
+StartupWMClass=rustpad-gui
