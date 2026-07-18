@@ -3,6 +3,15 @@
 All notable changes to Rustpad are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.3] – 2026-07-19
+
+### Added
+
+- **Right-click context menu** in the editor with Undo, Redo, Cut, Copy,
+  Paste, Delete and Select All. The selection survives the right-click
+  (egui normally moves the cursor on any press), so Copy/Cut act on what
+  you selected — like in GTK editors.
+
 ## [0.2.2] – 2026-07-19
 
 ### Fixed

@@ -152,6 +152,11 @@ struct Notepad {
     scroll_to_cursor: bool,
     // current editor scroll position (observed; used by tests)
     scroll_offset: egui::Vec2,
+    // selection as of last frame, restored across right-clicks
+    last_selection: (usize, usize),
+    // events for the editor, injected at the start of the next frame
+    // (events pushed after the editor has rendered would otherwise be lost)
+    pending_events: Vec<egui::Event>,
 }
 
 const MAX_RECENT: usize = 8;
@@ -186,6 +191,8 @@ impl Notepad {
             recent: Vec::new(),
             scroll_to_cursor: false,
             scroll_offset: egui::Vec2::ZERO,
+            last_selection: (0, 0),
+            pending_events: Vec::new(),
         };
         pad.load_from_disk(path);
         pad
@@ -397,20 +404,23 @@ impl Notepad {
         self.scroll_to_cursor = true;
     }
 
-    // send an event to the text field (undo, cut, paste …)
-    fn send_event(&self, ctx: &egui::Context, e: egui::Event) {
+    // send an event to the text field (undo, cut, paste …); queued and
+    // injected at the start of the next frame so it also works from UI that
+    // renders after the editor (e.g. the right-click menu)
+    fn send_event(&mut self, ctx: &egui::Context, e: egui::Event) {
         ctx.memory_mut(|m| m.request_focus(editor_id()));
-        ctx.input_mut(|i| i.events.push(e));
+        self.pending_events.push(e);
+        ctx.request_repaint();
     }
 
-    fn send_key(&self, ctx: &egui::Context, key: egui::Key, modifiers: egui::Modifiers) {
+    fn send_key(&mut self, ctx: &egui::Context, key: egui::Key, modifiers: egui::Modifiers) {
         self.send_event(
             ctx,
             egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers },
         );
     }
 
-    fn paste(&self, ctx: &egui::Context) {
+    fn paste(&mut self, ctx: &egui::Context) {
         if let Ok(t) = arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
             self.send_event(ctx, egui::Event::Paste(t));
         }
@@ -712,8 +722,50 @@ impl Notepad {
         });
     }
 
+    // right-click menu with the usual editing actions
+    fn context_menu(&mut self, ctx: &egui::Context, response: &egui::Response) {
+        // egui moves the cursor on ANY press, which would wipe the selection
+        // before the menu opens; restore it so "Copy" has something to copy
+        // (GTK editors keep the selection on right-click the same way)
+        if response.hovered() && ctx.input(|i| i.pointer.secondary_pressed()) {
+            let (a, b) = self.last_selection;
+            if a != b {
+                self.select(ctx, a, b);
+            }
+        }
+        response.context_menu(|ui| {
+            use egui::{Event, Key, Modifiers as M};
+            let btn = |t: &str, s: &str| egui::Button::new(t).shortcut_text(s.to_owned());
+            if ui.add(btn("Undo", "Ctrl+Z")).clicked() {
+                self.send_key(ctx, Key::Z, M::CTRL);
+            }
+            if ui.add(btn("Redo", "Ctrl+Shift+Z")).clicked() {
+                self.send_key(ctx, Key::Z, M::CTRL | M::SHIFT);
+            }
+            ui.separator();
+            if ui.add(btn("Cut", "Ctrl+X")).clicked() {
+                self.send_event(ctx, Event::Cut);
+            }
+            if ui.add(btn("Copy", "Ctrl+C")).clicked() {
+                self.send_event(ctx, Event::Copy);
+            }
+            if ui.add(btn("Paste", "Ctrl+V")).clicked() {
+                self.paste(ctx);
+            }
+            if ui.add(btn("Delete", "Del")).clicked() {
+                self.send_key(ctx, Key::Delete, M::NONE);
+            }
+            ui.separator();
+            if ui.add(btn("Select All", "Ctrl+A")).clicked() {
+                self.select(ctx, 0, self.text.chars().count());
+            }
+        });
+        self.last_selection = self.selection(ctx);
+    }
+
     // shared handling of the editor response (status + drag auto-scroll)
     fn editor_response(&mut self, ui: &egui::Ui, wrap: bool, response: &egui::Response) {
+        self.context_menu(&ui.ctx().clone(), response);
                 if response.changed() {
                     self.status_msg.clear();
                 }
@@ -770,6 +822,12 @@ impl eframe::App for Notepad {
 impl Notepad {
     fn app_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        // deliver queued editor events before the editor renders this frame
+        if !self.pending_events.is_empty() {
+            ctx.memory_mut(|m| m.request_focus(editor_id()));
+            let events = std::mem::take(&mut self.pending_events);
+            ctx.input_mut(|i| i.events.extend(events));
+        }
         self.handle_shortcuts(&ctx);
 
         // Ctrl+scroll zooms, like in a browser
@@ -1477,5 +1535,62 @@ mod ui_tests {
         eprintln!("after wheel while dragging: offset={offset} sel_end={sel_end}");
         assert!(offset > 0.0, "wheel should scroll while holding a selection, offset={offset}");
         assert!(sel_end > sel_b, "selection should extend as the view scrolls under the pointer");
+    }
+
+    // Right-click: menu opens, the selection survives, and Copy copies it
+    #[test]
+    fn context_menu_copy_keeps_selection() {
+        let mut h = harness("hello wonderful world");
+        h.run();
+
+        // select "wonderful" (chars 6..15)
+        let ctx = h.ctx.clone();
+        h.state_mut().select(&ctx, 6, 15);
+        h.run();
+        assert_eq!(h.state().selection(&ctx), (6, 15));
+
+        // right-click somewhere on the text
+        let pos = Pos2::new(120.0, 60.0);
+        h.hover_at(pos);
+        h.step();
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Secondary,
+                pressed,
+                modifiers: Default::default(),
+            });
+            h.step();
+        }
+        h.run_steps(2);
+        assert_eq!(
+            h.state().selection(&ctx),
+            (6, 15),
+            "the selection must survive the right-click"
+        );
+
+        // the context menu is open; click Copy and catch the clipboard command
+        let copy_pos = h.get_by_label("Copy Ctrl+C").rect().center();
+        h.hover_at(copy_pos);
+        h.step();
+        let mut copied = None;
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton {
+                pos: copy_pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            });
+            h.step();
+        }
+        for _ in 0..4 {
+            h.step();
+            for cmd in &h.output().platform_output.commands {
+                if let egui::OutputCommand::CopyText(t) = cmd {
+                    copied = Some(t.clone());
+                }
+            }
+        }
+        assert_eq!(copied.as_deref(), Some("wonderful"), "Copy should copy the selection");
     }
 }
