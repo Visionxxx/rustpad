@@ -721,6 +721,13 @@ impl Notepad {
         // view (it only follows the cursor on keyboard input), so keep
         // scrolling ourselves as long as the pointer is outside.
         if response.dragged() {
+            // the ScrollArea also ignores the wheel while any widget is
+            // dragged, so forward wheel input to keep scroll-while-selecting
+            // working like in other editors (the selection follows along)
+            let wheel = ui.input(|i| i.smooth_scroll_delta());
+            if wheel != egui::Vec2::ZERO {
+                ui.scroll_with_delta_animation(wheel, egui::style::ScrollAnimation::none());
+            }
             if let Some(pos) = ui.ctx().pointer_latest_pos() {
                 let visible = ui.clip_rect();
                 let past_edge = |lo: f32, hi: f32, p: f32| {
@@ -1433,5 +1440,42 @@ mod ui_tests {
         // with it, the view follows and the selection keeps growing
         assert!(sel_end > 300, "view should scroll while dragging, got {sel_end}");
         assert!(sel_end > halfway, "selection should keep growing while the pointer rests");
+    }
+
+    // Repro: wheel-scrolling while holding a drag-selection
+    #[test]
+    fn wheel_scroll_during_drag_selection() {
+        let text: String = (1..=300).map(|i| format!("line {i}\n")).collect();
+        let mut h = harness(&text);
+        h.set_size(egui::Vec2::new(500.0, 300.0));
+        h.run();
+
+        // press and hold inside the text, drag a little to start a selection
+        h.hover_at(Pos2::new(200.0, 100.0));
+        h.step();
+        h.drag_at(Pos2::new(200.0, 100.0));
+        h.step();
+        h.hover_at(Pos2::new(200.0, 150.0));
+        h.run_steps(2);
+        let (sel_a, sel_b) = { let ctx = h.ctx.clone(); h.state().selection(&ctx) };
+        eprintln!("selection while holding: {sel_a}..{sel_b}");
+        assert!(sel_b > sel_a, "drag should have started a selection");
+
+        // now spin the wheel DOWN while the button is still held
+        for _ in 0..10 {
+            h.event(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line,
+                delta: egui::Vec2::new(0.0, -3.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: Default::default(),
+            });
+            h.step();
+        }
+        h.run_steps(3);
+        let offset = h.state().scroll_offset.y;
+        let (_, sel_end) = { let ctx = h.ctx.clone(); h.state().selection(&ctx) };
+        eprintln!("after wheel while dragging: offset={offset} sel_end={sel_end}");
+        assert!(offset > 0.0, "wheel should scroll while holding a selection, offset={offset}");
+        assert!(sel_end > sel_b, "selection should extend as the view scrolls under the pointer");
     }
 }

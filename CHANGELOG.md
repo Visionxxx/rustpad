@@ -3,6 +3,16 @@
 All notable changes to Rustpad are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.2] – 2026-07-19
+
+### Fixed
+
+- **The scroll wheel did nothing while selecting text with the mouse.**
+  egui disables wheel scrolling whenever a widget is being dragged, so
+  holding a selection and spinning the wheel was ignored. Wheel input is
+  now forwarded during drag-selection, and the selection follows along —
+  like in other editors.
+
 ## [0.2.1] – 2026-07-11
 
 ### Fixed
